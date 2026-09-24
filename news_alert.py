@@ -453,7 +453,41 @@ def make_handler(watcher: Watcher):
                 self.send_page(page(watcher, q.get("done"), bool(q.get("all"))))
             else:
                 self.send_page("not found", 404)
+
+        def do_POST(self):
+            # 처음부터 다시: 페이지에서 한 번 더 확인받은 뒤에만 온다.
+            # 다른 사이트가 몰래 보내지 못하게 사용자 정의 헤더를 요구한다 (브라우저가 막는다).
+            u = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path != "/reset" or self.headers.get("X-Reset") != "yes" or q.get("what") not in ("feedback", "all"):
+                self.send_page("bad request", 400)
+                return
+            moved = reset_records(watcher, q["what"])
+            data = json.dumps({"moved": moved}, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
     return H
+
+
+def reset_records(watcher: Watcher, what: str) -> list:
+    """반응 기록(과 판별 기록)을 지운다. 실제로는 이름을 바꿔 백업으로 남긴다."""
+    stamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    files = [FEEDBACK] + ([JUDGED] if what == "all" else [])
+    moved = []
+    with _lock:
+        for path in files:
+            if path.exists():
+                backup = path.with_name(f"{path.stem}.{stamp}.bak{path.suffix}")
+                path.rename(backup)
+                moved.append(backup.name)
+        if what == "all":
+            watcher.judged.clear()
+            watcher.first_seen.clear()
+    log(f"처음부터 다시 ({what}): {', '.join(moved) or '지울 기록 없음'}")
+    return moved
 
 
 SOURCE_NAMES = {"reuters": "Reuters", "로이터": "Reuters", "financial-juice": "FinancialJuice"}
@@ -498,7 +532,7 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
         rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids))
         rows.extend(row_html(k, fb, done, qs, child_of=gid) for k in kids)
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
-    return page_html(watcher, rows, note, show_all, low, hidden)
+    return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v))
 
 
 def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "") -> str:
@@ -531,7 +565,7 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
         f"<div class=why>{src}{topic}{html.escape(r.get('reason', ''))}{group}</div></td></tr>")
 
 
-def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int) -> str:
+def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int) -> str:
     note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다. "
     note += ("<a href='/' style='text-decoration:underline'>숨기기</a></p>" if show_all else
              f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다. <a href='/?all=1' style='text-decoration:underline'>모두 보기</a></p>")
@@ -540,12 +574,29 @@ def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int,
 body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
-.b{{white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
+.b{{white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
 </style>
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스</small></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
 {note}<p class=why id=upd></p><table id=list>{''.join(rows)}</table>
+<p class="why reset">처음부터 다시 ·
+  <a id=reset-feedback data-n="{n_fb}">반응 기록 지우기 ({n_fb}건)</a> ·
+  <a id=reset-all data-n="{n_fb}" data-j="{len(watcher.judged)}">반응과 판별 기록 모두 지우기 ({n_fb}건 · {len(watcher.judged)}건)</a>
+  — 지운 기록은 같은 폴더에 .bak 파일로 남는다</p>
 <script>
+// 처음부터 다시: 지우기 전에 반드시 한 번 더 묻는다
+async function resetRecords(what, msg) {{
+  if (!confirm(msg + "\\n\\n정말 지우시겠습니까? (기록은 .bak 파일로 옮겨져 되살릴 수 있습니다)")) return;
+  const r = await fetch("/reset?what=" + what, {{method: "POST", headers: {{"X-Reset": "yes"}}}});
+  const d = r.ok ? await r.json() : null;
+  alert(d ? "지웠습니다. 백업: " + (d.moved.join(", ") || "(지울 기록 없음)") : "지우지 못했습니다 (" + r.status + ")");
+  location.href = "/";
+}}
+document.getElementById("reset-feedback").onclick = (e) => resetRecords("feedback",
+  "🔔10·👍·👎·🔕0 반응 기록 " + e.target.dataset.n + "건을 지웁니다.\\n판별기는 관심사(interests.md)만 보고 처음부터 다시 배웁니다.");
+document.getElementById("reset-all").onclick = (e) => resetRecords("all",
+  "반응 기록 " + e.target.dataset.n + "건과 판별 기록 " + e.target.dataset.j + "건을 모두 지웁니다.\\n목록이 비고, 최근 60분 안의 뉴스는 다시 판별합니다.");
+
 // 15초마다 목록만 바꿔 끼운다. 스크롤 위치는 그대로 남는다.
 // 방금 누른 뉴스는 10초 동안 목록에 남긴다 (👎 해도 바로 사라지지 않게, 잘못 누르면 되돌릴 수 있게)
 let keep = null, keepAt = 0;

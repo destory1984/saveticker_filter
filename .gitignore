@@ -6,3 +6,5 @@ news_alert.log
 __pycache__/
 # 세션 인수인계 메모 — 이 PC 에만 둔다 (저장소가 공개라 올리지 않는다)
 CLAUDE.md
+# 처음부터 다시 할 때 남기는 백업 (개인 기록)
+*.bak.jsonl
