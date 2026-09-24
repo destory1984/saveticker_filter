@@ -21,6 +21,7 @@
 import argparse
 import csv
 import difflib
+import hashlib
 import html
 import json
 import re
@@ -59,8 +60,8 @@ DEFAULTS = {
     "max_wait_sec": 90,            # 뉴스를 모아서 한 번에 묻는다. batch 가 차거나 가장 오래 기다린 뉴스가 이만큼 되면 묻는다
     "port": 18765,
     "examples": 15,                # 프롬프트에 넣을 👍, 👎 각각의 최대 개수
-    "dup_ratio": 0.6,
-    "hide_max_score": 3,           # 판별 목록에서 이 점수 이하는 기본으로 숨긴다 (👍·🔔10 준 것은 보인다)              # 최근 알린 제목과 이만큼 비슷하면 알리지 않는다
+    "dup_ratio": 0.6,              # 최근 알린 제목과 이만큼 비슷하면 알리지 않는다
+    "hide_max_score": 3,           # 판별 목록에서 이 점수 이하는 기본으로 숨긴다 (👍·🔔10 준 것은 보인다)
 }
 
 PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
@@ -81,11 +82,19 @@ PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
 [과거 반응]
 {examples}
 
+같은 사건 묶기:
+- 뉴스마다 그 뉴스가 다루는 사건의 이름(topic)을 10자 안팎 한국어로 붙여라. 예: "미중 정상회담", "H&M 3분기 실적", "미 5년물 국채 입찰".
+- 한 사건에서 나온 여러 발언, 후속 보도([2보] 등), 다른 매체의 같은 보도는 모두 같은 이름을 쓴다.
+- [최근 사건 이름]에 같은 사건이 있으면 그 이름을 글자 그대로 다시 써라.
+
+[최근 사건 이름]
+{topics}
+
 [새 뉴스]
 {news}
 
 JSON 만 출력하라. 다른 말은 쓰지 마라.
-{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "왜 관심 있을지 15자 이내 한국어"}}]}}
+{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "왜 관심 있을지 15자 이내 한국어", "topic": "사건 이름"}}]}}
 """
 
 
@@ -241,7 +250,7 @@ def ask_ollama(cfg: dict, prompt: str, timeout: float) -> str:
 
 
 def parse_results(text: str, batch: list) -> dict:
-    """{id: (score, reason)}. 모델이 빠뜨린 뉴스는 결과에 없다."""
+    """{id: (score, reason, topic)}. 모델이 빠뜨린 뉴스는 결과에 없다."""
     try:
         items = json.loads(text).get("results", [])
     except (ValueError, AttributeError):
@@ -257,15 +266,17 @@ def parse_results(text: str, batch: list) -> dict:
         except (KeyError, TypeError, ValueError):
             continue
         if 1 <= i <= len(batch):
-            out[batch[i - 1]["id"]] = (max(0, min(10, score)), str(it.get("reason", "")).strip())
+            out[batch[i - 1]["id"]] = (max(0, min(10, score)), str(it.get("reason", "")).strip(),
+                                       str(it.get("topic", "")).strip())
     return out
 
 
-def judge(cfg: dict, batch: list) -> tuple:
-    """({id: (score, reason)}, 판별한 쪽 이름)."""
+def judge(cfg: dict, batch: list, topics: list = ()) -> tuple:
+    """({id: (score, reason, topic)}, 판별한 쪽 이름). topics 는 최근에 붙인 사건 이름."""
     prompt = PROMPT.format(
         interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
         examples=examples_text(cfg["examples"]),
+        topics="\n".join(topics) or "(없음)",
         news="\n".join(f"{i}. {news_line(r)}" for i, r in enumerate(batch, 1)),
     )
     backend = cfg["backend"]
@@ -316,6 +327,25 @@ class Watcher:
         return any(difflib.SequenceMatcher(None, title, s).ratio() >= self.cfg["dup_ratio"]
                    for _, s in self.recent_alerts)
 
+    def recent(self, hours: float) -> list:
+        """최근 hours 시간 안에 판별한 기록, 새것부터."""
+        cutoff = (datetime.now(KST) - timedelta(hours=hours)).isoformat(timespec="seconds")
+        recs = [r for r in self.judged.values() if r.get("at", "") >= cutoff]
+        return sorted(recs, key=lambda r: r.get("at", ""), reverse=True)
+
+    def recent_topics(self) -> list:
+        """프롬프트에 넣을 최근 사건 이름. 같은 사건에 같은 이름을 다시 쓰게 한다."""
+        seen = []
+        for r in self.recent(3):
+            t = r.get("topic")
+            if t and t not in seen:
+                seen.append(t)
+        return seen[:40]
+
+    def topic_alerted(self, topic: str) -> bool:
+        """한 시간 안에 이 사건으로 알림을 보냈는가."""
+        return bool(topic) and any(r.get("alerted") and r.get("topic") == topic for r in self.recent(1))
+
     def pending(self) -> list:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=self.cfg["max_age_min"])
         seen, out = set(), []
@@ -342,7 +372,7 @@ class Watcher:
             batch = todo[k:k + self.cfg["batch"]]
             t0 = time.time()
             try:
-                result, by = judge(self.cfg, batch)
+                result, by = judge(self.cfg, batch, self.recent_topics())
             except Exception as e:   # 모델이 바쁘거나 꺼져 있으면 다음 차례에 다시
                 log(f"판별 실패: {e}")
                 return
@@ -350,15 +380,17 @@ class Watcher:
             for r in batch:
                 if r["id"] not in result:
                     continue
-                score, reason = result[r["id"]]
-                alert = score >= self.cfg["threshold"] and not self.is_dup(r["title"])
+                score, reason, topic = result[r["id"]]
+                # 같은 사건(시진핑 발언 문장마다 뜨는 속보 등)은 한 시간에 한 번만 알린다
+                alert = (score >= self.cfg["threshold"] and not self.topic_alerted(topic)
+                         and not self.is_dup(r["title"]))
                 rec = {"id": r["id"], "title": r["title"], "url": r["url"], "source": r.get("source", ""),
-                       "created_at": r["created_at"], "score": score, "reason": reason,
+                       "created_at": r["created_at"], "score": score, "reason": reason, "topic": topic,
                        "alerted": alert, "by": by, "at": datetime.now(KST).isoformat(timespec="seconds")}
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
                 mark = "🔔" if alert else "  "
-                log(f"{mark} {score:>2} {r['title'][:70]}  — {reason}")
+                log(f"{mark} {score:>2} [{topic}] {r['title'][:70]}  — {reason}")
                 if alert:
                     self.recent_alerts.append((time.time(), r["title"]))
                     toast(self.cfg, r, score, reason)
@@ -447,27 +479,59 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
         recs = [r for r in recs if not hide(r)]
     recs = recs[:150]
     qs = "&all=1" if show_all else ""
-    rows = []
+    # 같은 사건(topic)은 가장 최근 뉴스 한 줄로 접는다. 6시간 넘게 떨어지면 다른 묶음으로 본다.
+    heads, members, order = {}, {}, []
     for r in recs:
-        t = parse_ts(r.get("created_at", ""))
-        when = t.astimezone(KST).strftime("%m-%d %H:%M") if t else ""
-        state = fb.get(r["id"])   # "10" / "1" / "0" / "00" / None
-        cls = ' class="hit"' if r.get("alerted") else ""
-        cls = ' class="done"' if r["id"] == done else cls
-        source = SOURCE_NAMES.get(r.get("source", ""), r.get("source", ""))
-        src = f"<span class=src>{html.escape(source)}</span>" if source else ""
-        # 누른 버튼은 불이 켜지고, 다시 누르면 취소된다.
-        btns = "".join(
-            f"<a class='fb{' num' if v in ('10', '00') else ''}{' on' if state == v else ''}' title='{tip}' "
-            f"href='/fb?id={r['id']}&v={'x' if state == v else v}{qs}'>{label}</a>"
-            for v, label, tip in (("10", "🔔10", "반드시 알려라 (10점)"), ("1", "👍", "관심"),
-                                  ("0", "👎", "별로"), ("00", "🔕0", "절대 알리지 마라 (0점)")))
-        rows.append(
-            f"<tr{cls}><td class=b>{btns}</td>"
-            f"<td>{when}</td><td class=s>{r['score']}</td>"
-            f"<td><a{' class=rated' if state else ''} href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
-            f"<div class=why>{src}{html.escape(r.get('reason', ''))}</div></td></tr>")
+        tp, t = r.get("topic"), parse_ts(r.get("created_at", ""))
+        h = heads.get(tp) if tp else None
+        if h and t and (parse_ts(h["created_at"]) - t) <= timedelta(hours=6):
+            members[h["id"]].append(r)
+        else:
+            if tp:
+                heads[tp] = r
+            members[r["id"]] = []
+            order.append(r)
+    rows = []
+    for head in order:
+        kids = members[head["id"]]
+        gid = hashlib.md5(head.get("topic", head["id"]).encode()).hexdigest()[:10] if kids else ""
+        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids))
+        rows.extend(row_html(k, fb, done, qs, child_of=gid) for k in kids)
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
+    return page_html(watcher, rows, note, show_all, low, hidden)
+
+
+def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "") -> str:
+    t = parse_ts(r.get("created_at", ""))
+    when = t.astimezone(KST).strftime("%m-%d %H:%M") if t else ""
+    state = fb.get(r["id"])   # "10" / "1" / "0" / "00" / None
+    classes = ["hit"] if r.get("alerted") else []
+    if r["id"] == done:
+        classes = ["done"]
+    if child_of:
+        classes += ["child", f"g-{child_of}"]
+    cls = f' class="{" ".join(classes)}"' if classes else ""
+    group = ""
+    if kids:
+        top = max(k["score"] for k in kids)
+        group = (f" <a class=grp data-g='{gid}'>같은 사건 +{len(kids)}건 (최고 {top}점) ▾</a>")
+    topic = f"<span class=tp>{html.escape(r['topic'])}</span>" if r.get("topic") else ""
+    source = SOURCE_NAMES.get(r.get("source", ""), r.get("source", ""))
+    src = f"<span class=src>{html.escape(source)}</span>" if source else ""
+    # 누른 버튼은 불이 켜지고, 다시 누르면 취소된다.
+    btns = "".join(
+        f"<a class='fb{' num' if v in ('10', '00') else ''}{' on' if state == v else ''}' title='{tip}' "
+        f"href='/fb?id={r['id']}&v={'x' if state == v else v}{qs}'>{label}</a>"
+        for v, label, tip in (("10", "🔔10", "반드시 알려라 (10점)"), ("1", "👍", "관심"),
+                              ("0", "👎", "별로"), ("00", "🔕0", "절대 알리지 마라 (0점)")))
+    return (
+        f"<tr{cls}><td class=b>{btns}</td>"
+        f"<td>{when}</td><td class=s>{r['score']}</td>"
+        f"<td><a{' class=rated' if state else ''} href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
+        f"<div class=why>{src}{topic}{html.escape(r.get('reason', ''))}{group}</div></td></tr>")
+
+
+def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int) -> str:
     note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다. "
     note += ("<a href='/' style='text-decoration:underline'>숨기기</a></p>" if show_all else
              f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다. <a href='/?all=1' style='text-decoration:underline'>모두 보기</a></p>")
@@ -476,7 +540,7 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
 body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
-.b{{white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}}
+.b{{white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:24px}}
 </style>
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스</small></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
@@ -493,6 +557,7 @@ async function refresh() {{
     const r = await fetch("/?" + params, {{cache: "no-store"}});
     const doc = new DOMParser().parseFromString(await r.text(), "text/html");
     document.getElementById("list").innerHTML = doc.getElementById("list").innerHTML;
+    applyOpen();
     document.getElementById("upd").textContent = "자동 갱신 " + new Date().toLocaleTimeString("ko-KR", {{hour12: false}});
   }} catch (e) {{
     document.getElementById("upd").textContent = "판별기에 연결할 수 없습니다 (" + new Date().toLocaleTimeString("ko-KR", {{hour12: false}}) + ")";
@@ -500,8 +565,26 @@ async function refresh() {{
 }}
 setInterval(refresh, 15000);
 
+// 같은 사건 묶음: 펼친 것은 자동 갱신 뒤에도 펼친 채로 둔다
+const opened = new Set();
+function applyOpen() {{
+  document.querySelectorAll("tr.child").forEach((tr) => {{
+    const g = [...tr.classList].find((c) => c.startsWith("g-"));
+    tr.classList.toggle("show", opened.has(g.slice(2)));
+  }});
+  document.querySelectorAll("a.grp").forEach((a) => {{
+    a.textContent = a.textContent.replace(/[▾▴]$/, opened.has(a.dataset.g) ? "▴" : "▾");
+  }});
+}}
+
 // 👍/👎 는 페이지를 옮기지 않고 기록한다. 그래서 스크롤 위치가 그대로 남는다.
 document.getElementById("list").addEventListener("click", async (e) => {{
+  const g = e.target.closest("a.grp");
+  if (g) {{
+    opened.has(g.dataset.g) ? opened.delete(g.dataset.g) : opened.add(g.dataset.g);
+    applyOpen();
+    return;
+  }}
   const a = e.target.closest("a.fb");
   if (!a) return;
   e.preventDefault();
@@ -522,23 +605,31 @@ document.getElementById("list").addEventListener("click", async (e) => {{
 def main():
     ap = argparse.ArgumentParser(description="세이브티커 관심 뉴스 알림")
     ap.add_argument("--test", type=int, metavar="N", help="최근 N건만 판별해 출력하고 끝낸다")
+    ap.add_argument("--before", metavar="TIME", help="--test 에서 이 한국 시각까지의 뉴스만 (예: '2026-09-24 23:50')")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     cfg = load_config()
 
     if args.test:
-        rows = sorted(read_news(), key=lambda r: r["ts"])[-args.test:]
+        rows = sorted(read_news(), key=lambda r: r["ts"])
+        if args.before:   # 예: "2026-09-24 23:50" (한국 시각)
+            until = datetime.fromisoformat(args.before).replace(tzinfo=KST)
+            rows = [r for r in rows if r["ts"] <= until]
+        rows = rows[-args.test:]
         if not rows:
             sys.exit(f"{DATA} 에 오늘·어제 CSV 가 없다.")
+        topics = []
         for k in range(0, len(rows), cfg["batch"]):
             batch = rows[k:k + cfg["batch"]]
             t0 = time.time()
-            res, by = judge(cfg, batch)
+            res, by = judge(cfg, batch, topics)
             log(f"{len(batch)}건 판별 {time.time() - t0:.1f}초 ({by})")
             for r in batch:
-                score, reason = res.get(r["id"], (None, "(응답 없음)"))
+                score, reason, topic = res.get(r["id"], (None, "(응답 없음)", ""))
                 mark = "🔔" if score is not None and score >= cfg["threshold"] else "  "
-                print(f"{mark} {score if score is not None else '-':>2} {r['title'][:80]}  — {reason}")
+                print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — {reason}")
+                if topic and topic not in topics:
+                    topics.insert(0, topic)
         return
 
     watcher = Watcher(cfg)
