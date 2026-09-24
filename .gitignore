@@ -4,3 +4,5 @@ news_judged.jsonl
 news_feedback.jsonl
 news_alert.log
 __pycache__/
+# 세션 인수인계 메모 — 이 PC 에만 둔다 (저장소가 공개라 올리지 않는다)
+CLAUDE.md
