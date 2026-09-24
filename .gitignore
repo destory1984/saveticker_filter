@@ -8,3 +8,5 @@ __pycache__/
 CLAUDE.md
 # 처음부터 다시 할 때 남기는 백업 (개인 기록)
 *.bak.jsonl
+# 작업 노트 — 이 PC 에만 둔다
+NOTES.md
