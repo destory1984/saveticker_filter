@@ -1,0 +1,6 @@
+# 수집한 뉴스와 개인 기록은 올리지 않는다
+data/
+news_judged.jsonl
+news_feedback.jsonl
+news_alert.log
+__pycache__/

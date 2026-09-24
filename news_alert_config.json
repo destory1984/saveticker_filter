@@ -1,0 +1,18 @@
+{
+ "backend": "auto",
+ "claude_model": "sonnet",
+ "ollama_url": "http://localhost:11434/api/generate",
+ "model": "qwen3.8:27b",
+ "keep_alive": -1,
+ "timeout_sec": 180,
+ "threshold": 7,
+ "max_age_min": 60,
+ "batch": 10,
+ "poll_sec": 10,
+ "port": 18765,
+ "examples": 15,
+ "dup_ratio": 0.6,
+ "max_wait_sec": 90,
+ "ollama_timeout_sec": 90,
+ "hide_max_score": 3
+}

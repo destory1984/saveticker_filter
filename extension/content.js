@@ -1,0 +1,122 @@
+// Isolated-world bridge: stores headlines in chrome.storage.local and runs
+// the page-fetch / watch jobs requested from the popup.
+const MARK = "__saveticker_collector__";
+const API = "/api/news/list";
+const MAX_ITEMS = 5000;
+
+function toRow(it) {
+  const en = it.translations?.translated?.en_US || {};
+  return {
+    id: it.id,
+    created_at: it.created_at || "",
+    title: (it.title || "").trim(),
+    title_en: (en.title || "").trim(),
+    source: it.source || it.author_name || "",
+    tickers: (it.tickers || []).map((t) => t.symbol).join(" "),
+    labels: (it.content_labels || []).map((l) => l.name).join(" "),
+    url: `${location.origin}/news/${it.id}`,
+  };
+}
+
+// Serialize writes so concurrent batches don't clobber each other.
+let queue = Promise.resolve();
+function store(items) {
+  queue = queue.then(async () => {
+    const { news = {} } = await chrome.storage.local.get("news");
+    let added = 0;
+    for (const it of items) {
+      if (!it?.id || it.is_deleted) continue;
+      const row = toRow(it);
+      const old = news[it.id];
+      // 사이트는 원문 제목을 먼저 올리고 몇 초~1분 뒤 한글 번역으로 바꾼다. 바뀐 제목은 덮어쓴다.
+      if (old && old.title === row.title && old.title_en === row.title_en) continue;
+      if (!old) added++;
+      news[it.id] = row;
+    }
+    let rows = Object.values(news);
+    if (rows.length > MAX_ITEMS) {
+      rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+      rows = rows.slice(0, MAX_ITEMS);
+    }
+    await chrome.storage.local.set({
+      news: Object.fromEntries(rows.map((r) => [r.id, r])),
+      lastUpdate: new Date().toISOString(),
+    });
+    return added;
+  });
+  return queue;
+}
+
+// Headlines the page loads on its own (initial load, scrolling, refresh button).
+window.addEventListener("message", (e) => {
+  if (e.source === window && e.data?.[MARK]) store(e.data.items);
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchPage(page, size = 20) {
+  const q = new URLSearchParams({ page, page_size: size, sort: "created_at_desc" });
+  const r = await fetch(`${API}?${q}`, { credentials: "include" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (await r.json()).news_list || [];
+}
+
+let job = { running: false, stop: false };
+
+async function collectPages(pages, delayMs) {
+  if (job.running) return;
+  job = { running: true, stop: false };
+  let status = "";
+  try {
+    for (let p = 1; p <= pages && !job.stop; p++) {
+      await setStatus(`${p}/${pages} 페이지 수집 중…`);
+      const items = await fetchPage(p);
+      if (!items.length) { status = `${p - 1}페이지에서 끝`; break; }
+      await store(items);
+      if (p < pages) await sleep(delayMs);
+    }
+    status = status || (job.stop ? "중지됨" : "완료");
+  } catch (err) {
+    status = `오류: ${err.message} (페이지를 새로고침한 뒤 다시 시도)`;
+  } finally {
+    job.running = false;
+    await setStatus(status);
+  }
+}
+
+let watchTimer = null;
+async function watchTick() {
+  try {
+    // 2페이지까지 본다: 번역이 늦은 뉴스가 1페이지 밖으로 밀려나도 한글 제목을 받도록.
+    const added = await store([...(await fetchPage(1)), ...(await fetchPage(2))]);
+    await setStatus(`감시 중 · 마지막 확인 ${new Date().toLocaleTimeString()} (+${added})`);
+    await chrome.storage.local.set({ lastTick: Date.now() });   // background.js 감시견이 본다
+  } catch (err) {
+    await setStatus(`감시 오류: ${err.message}`);
+  }
+}
+function setWatch(on, sec) {
+  clearInterval(watchTimer);
+  watchTimer = null;
+  if (on) {
+    watchTick();
+    watchTimer = setInterval(watchTick, Math.max(30, sec) * 1000);
+  }
+}
+
+const setStatus = (status) => chrome.storage.local.set({ status });
+
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg.cmd === "collect") collectPages(msg.pages, msg.delayMs);
+  else if (msg.cmd === "stop") job.stop = true;
+  else if (msg.cmd === "watch") setWatch(msg.on, msg.sec);
+  reply({ ok: true, running: job.running, watching: !!watchTimer });
+});
+
+// Resume watching after a reload if it was left on.
+chrome.storage.local.get(["watchOn", "watchSec"]).then(({ watchOn, watchSec }) => {
+  if (watchOn) {
+    const start = () => setWatch(true, watchSec || 60);
+    document.readyState === "loading" ? addEventListener("DOMContentLoaded", start) : start();
+  }
+});
