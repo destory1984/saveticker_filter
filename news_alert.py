@@ -94,6 +94,7 @@ PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
 - 4~6: 간접적으로만 관련
 - 0~3: 관련 없음, 이미 나온 내용의 반복, 사소한 소식
 [과거 반응]에서 👍 받은 뉴스와 비슷하면 점수를 올리고, 👎 받은 뉴스와 비슷하면 내려라.
+reason 과 con 은 점수와 상관없이 둘 다 쓴다. 점수가 높으면 reason 이 앞서고 낮으면 con 이 앞선다. 정말 없으면 빈 문자열.
 [과거 반응]의 🔔 는 "이런 뉴스는 반드시 알려라", 🔕 는 "이런 뉴스는 절대 알리지 마라"는 강한 표시다.
 🔔 와 같은 종류의 뉴스는 9~10점, 🔕 와 같은 종류는 0~1점을 줘라. 이것이 👍/👎 와 관심사보다 우선한다.
 
@@ -119,7 +120,7 @@ PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
 {news}
 
 JSON 만 출력하라. 다른 말은 쓰지 마라.
-{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "왜 관심 있을지 15자 이내 한국어", "topic": "사건 이름", "say": "제목을 소리내 읽기 좋게 12자 안팎으로 줄인 말. 예: 이란 휴전안 거부"}}]}}
+{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "이 사람이 이 뉴스를 볼 까닭 12자 이내 한국어", "con": "이 사람이 이 뉴스를 안 볼 까닭 12자 이내 한국어", "topic": "사건 이름", "say": "제목을 소리내 읽기 좋게 12자 안팎으로 줄인 말. 예: 이란 휴전안 거부"}}]}}
 """
 
 
@@ -275,7 +276,7 @@ def ask_ollama(cfg: dict, prompt: str, timeout: float) -> str:
 
 
 def parse_results(text: str, batch: list) -> dict:
-    """{id: (score, reason, topic, say)}. 모델이 빠뜨린 뉴스는 결과에 없다."""
+    """{id: (score, reason, topic, say, con)}. reason 은 볼 까닭, con 은 안 볼 까닭. 모델이 빠뜨린 뉴스는 결과에 없다."""
     try:
         items = json.loads(text).get("results", [])
     except (ValueError, AttributeError):
@@ -292,12 +293,13 @@ def parse_results(text: str, batch: list) -> dict:
             continue
         if 1 <= i <= len(batch):
             out[batch[i - 1]["id"]] = (max(0, min(10, score)), str(it.get("reason", "")).strip(),
-                                       str(it.get("topic", "")).split(" — ")[0].strip(), str(it.get("say", "")).strip())
+                                       str(it.get("topic", "")).split(" — ")[0].strip(), str(it.get("say", "")).strip(),
+                                       str(it.get("con", "") or "").strip())
     return out
 
 
 def judge(cfg: dict, batch: list, topics: list = ()) -> tuple:
-    """({id: (score, reason, topic, say)}, 판별한 쪽 이름). topics 는 최근에 붙인 사건 이름."""
+    """({id: (score, reason, topic, say, con)}, 판별한 쪽 이름). topics 는 최근에 붙인 사건 이름."""
     prompt = PROMPT.format(
         interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
         examples=examples_text(cfg["examples"]),
@@ -942,19 +944,19 @@ class Watcher:
             for r in batch:
                 if r["id"] not in result:
                     continue
-                score, reason, topic, say = result[r["id"]]
+                score, reason, topic, say, con = result[r["id"]]
                 # 같은 사건(시진핑 발언 문장마다 뜨는 속보 등)은 한 시간에 한 번만 알린다
                 late = self.is_late(r)
                 alert = (score >= self.cfg["threshold"] and not late and not self.topic_alerted(topic)
                          and not self.is_dup(r["title"]))
                 rec = {"id": r["id"], "title": r["title"], "url": r["url"], "source": r.get("source", ""),
-                       "created_at": r["created_at"], "score": score, "reason": reason, "topic": topic,
+                       "created_at": r["created_at"], "score": score, "reason": reason, "con": con, "topic": topic,
                        "say": say, "tickers": r.get("tickers", ""), "alerted": alert, "late": late, "by": by,
                        "at": datetime.now(KST).isoformat(timespec="seconds")}
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
                 mark = "🔔" if alert else "⏰" if late and score >= self.cfg["threshold"] else "  "
-                log(f"{mark} {score:>2} [{topic}] {r['title'][:70]}  — {reason}")
+                log(f"{mark} {score:>2} [{topic}] {r['title'][:70]}  — ＋{reason} －{con}")
                 if alert:
                     self.recent_alerts.append((time.time(), r["title"]))
                     toast(self.cfg, r, score, reason)
@@ -1255,6 +1257,15 @@ def moves_html(moves: dict) -> str:
     return "".join(out)
 
 
+def reasons_html(r: dict) -> str:
+    """볼 까닭(＋, 초록)과 안 볼 까닭(－, 빨강). 09-27 전 기록은 점수를 준 까닭 하나(reason)뿐이라 그대로 보인다.
+    여러 페이지가 함께 쓰니 색은 style 로 붙인다."""
+    if not r.get("con"):
+        return html.escape(r.get("reason", ""))
+    pro = f"<span style='color:#8fc79a'>＋ {html.escape(r['reason'])}</span> " if r.get("reason") else ""
+    return pro + f"<span style='color:#d9918f;margin-left:4px'>－ {html.escape(r['con'])}</span>"
+
+
 def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "",
              moves: dict = None, market: dict = None) -> str:
     t = parse_ts(r.get("created_at", ""))
@@ -1289,7 +1300,7 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
         f"<tr{cls}><td class=b>{btns}</td>"
         f"<td class=t>{when}</td><td class=s>{r['score']}{by}</td>"
         f"<td><a{' class=rated' if state else ''} href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
-        f"<div class=why>{src}{topic}{html.escape(r.get('reason', ''))}{mv}{group}</div></td></tr>")
+        f"<div class=why>{src}{topic}{reasons_html(r)}{mv}{group}</div></td></tr>")
 
 
 def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int,
@@ -1460,7 +1471,7 @@ def stats_page(watcher: Watcher) -> str:
     def items(rs):
         rs = sorted(rs, key=lambda r: r.get("created_at", ""), reverse=True)[:12]
         return "".join(f"<tr><td class=n>{r['score']}</td><td><a href='{html.escape(r['url'])}' target=_blank>"
-                       f"{html.escape(r['title'])}</a> <span class=why>{html.escape(r.get('reason', ''))}</span></td></tr>"
+                       f"{html.escape(r['title'])}</a> <span class=why>{reasons_html(r)}</span></td></tr>"
                        for r in rs) or "<tr><td class=why>없음</td></tr>"
 
     missed = items(r for r in recs if good(r) and r["score"] < th)
@@ -1547,7 +1558,7 @@ def topic_page(watcher: Watcher, name: str) -> str:
         mark = "🔔 " if r.get("alerted") else ""
         rows.append(f"<tr><td class=why>{t.astimezone(KST):%m-%d %H:%M}</td><td class=n>{mark}{r['score']}</td>"
                     f"<td><a href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
-                    f"<div class=why>{html.escape(r.get('reason', ''))}"
+                    f"<div class=why>{reasons_html(r)}"
                     f"{moves_html(watcher.moves.get(r['id']) or {})}"
                     f"{market_html(watcher.market.get(r['id']) or {})}</div></td></tr>")
     known = watcher.summaries.get((name, len(recs)), "")
@@ -1605,9 +1616,9 @@ def main():
             res, by = judge(cfg, batch, [f"{t} — {title[:60]}" for t, title in reversed(topics.items())])
             log(f"{len(batch)}건 판별 {time.time() - t0:.1f}초 ({by})")
             for r in batch:
-                score, reason, topic, say = res.get(r["id"], (None, "(응답 없음)", "", ""))
+                score, reason, topic, say, con = res.get(r["id"], (None, "(응답 없음)", "", "", ""))
                 mark = "🔔" if score is not None and score >= cfg["threshold"] else "  "
-                print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — {reason}  🗣 {say}")
+                print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — ＋{reason} －{con}  🗣 {say}")
                 if topic:
                     topics.pop(topic, None)
                     topics[topic] = r["title"]
