@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SaveTicker 뉴스 수집기",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "saveticker.com 뉴스 제목을 브라우저에서 수집해 CSV/JSON으로 저장",
   "permissions": ["storage", "downloads", "downloads.ui", "alarms"],
   "background": { "service_worker": "background.js" },

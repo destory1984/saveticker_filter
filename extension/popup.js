@@ -81,7 +81,7 @@ $("clear").onclick = async () => {
 };
 
 chrome.storage.local.get(["watchOn", "watchSec", "autoSave"]).then(({ watchOn, watchSec, autoSave = true }) => {
-  $("watch").checked = !!watchOn;
+  $("watch").checked = watchOn !== false;   // 기본은 켜짐
   $("auto").checked = autoSave;
   if (watchSec) $("sec").value = watchSec;
 });

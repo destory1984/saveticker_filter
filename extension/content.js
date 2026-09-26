@@ -129,9 +129,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   reply({ ok: true, running: job.running, watching: !!watchTimer });
 });
 
-// Resume watching after a reload if it was left on.
+// 실시간 감시는 기본으로 켜진다. 팝업에서 끈 경우(watchOn === false)만 쉰다.
+// 저장 값이 비면(다시 설치 등) 감시가 조용히 꺼진 채로 남아 새 뉴스가 안 들어왔다 (09-27).
 chrome.storage.local.get(["watchOn", "watchSec"]).then(({ watchOn, watchSec }) => {
-  if (watchOn) {
+  if (watchOn !== false) {
     const start = () => setWatch(true, watchSec || 60);
     document.readyState === "loading" ? addEventListener("DOMContentLoaded", start) : start();
   }

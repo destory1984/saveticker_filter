@@ -102,9 +102,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await chrome.storage.local.get(["watchOn", "watchSec", "lastTick", "lastRevive"]);
   const tabs = await chrome.tabs.query({ url: SAVETICKER_URLS });
   // 판별기에 살아 있다고 알린다. 판별기는 이 소식이 끊기거나 감시가 멈추면 토스트로 알린다.
-  const q = new URLSearchParams({ watch: watchOn ? 1 : 0, tick: lastTick, tabs: tabs.length });
+  const on = watchOn !== false;   // 기본은 켜짐 (content.js 와 같게)
+  const q = new URLSearchParams({ watch: on ? 1 : 0, tick: lastTick, tabs: tabs.length });
   fetch(`http://127.0.0.1:18765/ping?${q}`, { cache: "no-store" }).catch(() => {});
-  if (!watchOn || !tabs.length) return;
+  if (!on || !tabs.length) return;
   for (const t of tabs) {
     if (t.autoDiscardable) chrome.tabs.update(t.id, { autoDiscardable: false }).catch(() => {});
   }

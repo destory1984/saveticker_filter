@@ -937,6 +937,13 @@ def make_handler(watcher: Watcher):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
+            elif u.path == "/status":
+                # 수집 상태 들여다보기: 확장이 마지막으로 보낸 소식과 지금의 탈
+                e = dict(watcher.ext or {})
+                for k in ("at", "tick"):
+                    if e.get(k):
+                        e[k] = datetime.fromtimestamp(e[k], KST).strftime("%H:%M:%S")
+                self.send_json({"ext": e, "problem": watcher.problem})
             elif u.path == "/judged.json":
                 # 확장 팝업이 판별한 뉴스를 흐리게 표시할 때 쓴다: {id: 점수}
                 data = json.dumps({k: v["score"] for k, v in watcher.judged.items()}).encode()
