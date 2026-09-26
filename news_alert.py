@@ -677,6 +677,50 @@ def plain_toast(cfg: dict, title: str, msg: str, path: str = "/"):
                  launch=f"http://127.0.0.1:{cfg['port']}{path}").show()
 
 
+# ─────────────────────────────────────────────────────────────
+# 수집이 멈췄는지 살피기
+# ─────────────────────────────────────────────────────────────
+
+def collect_problem(watcher: "Watcher") -> str:
+    """확장이 보내는 소식으로 수집에 탈이 있는지 본다. 없으면 빈 문자열."""
+    now = time.time()
+    # 켠 직후나 PC 가 깬 직후는 확장이 아직 소식을 못 보냈을 수 있다
+    if now - max(watcher.started, watcher.last_wake) < 300:
+        return watcher.problem
+    e = watcher.ext
+    if not e or now - e["at"] > 300:
+        return "Edge 확장에서 5분 넘게 소식이 없습니다 (Edge 가 꺼졌거나 확장이 멈췄거나 옛 버전)"
+    if not e["tabs"]:
+        return "Edge 에 saveticker 뉴스 탭이 열려 있지 않습니다"
+    if not e["watch"]:
+        return "확장의 실시간 감시가 꺼져 있습니다"
+    if now - e["tick"] > 600:
+        # 감시견이 3분마다 탭을 새로고침해 보는데도 10분째 못 받았다 (로그아웃·차단 따위)
+        return f"실시간 감시가 {(now - e['tick']) / 60:.0f}분째 뉴스를 받지 못했습니다"
+    return ""
+
+
+def health_worker(watcher: "Watcher"):
+    """1분마다 수집 상태를 보고, 탈이 생기거나 풀리면 한 번씩 알린다."""
+    while True:
+        time.sleep(60)
+        try:
+            now = collect_problem(watcher)
+            if now == watcher.problem:
+                continue
+            if now and not watcher.problem:
+                log(f"⚠ 뉴스 수집이 멈췄다: {now}")
+                plain_toast(watcher.cfg, "뉴스 수집이 멈췄습니다", now)
+            elif now:
+                log(f"⚠ 수집 탈이 바뀌었다: {now}")
+            else:
+                log("✅ 뉴스 수집이 다시 된다")
+                plain_toast(watcher.cfg, "뉴스 수집이 다시 됩니다", "새 뉴스가 다시 들어옵니다")
+            watcher.problem = now
+        except Exception as e:
+            log(f"수집 상태 확인 오류: {type(e).__name__}: {e}")
+
+
 def summary_toast(cfg: dict, n: int, top: list):
     try:
         from winotify import Notification, audio
@@ -699,6 +743,9 @@ class Watcher:
         self.wake_at = None       # PC 가 잠들었다 깬 시각. 밀린 판별이 끝나면 요약을 알리고 비운다
         self.moves = {m["id"]: m["moves"] for m in read_jsonl(MOVES)}   # id → {종목: {p0, m5, m30}}
         self.summaries = {}       # (사건 이름, 건수) → 흐름 요약. 뉴스가 늘면 다시 만든다
+        self.started = self.last_wake = time.time()
+        self.ext = None           # 확장이 1분마다 보내는 소식: {at, watch, tick, tabs}
+        self.problem = ""         # 지금 수집에 무슨 탈이 있나 (없으면 빈 문자열)
 
     def is_dup(self, title: str) -> bool:
         cutoff = time.time() - 3600
@@ -790,7 +837,7 @@ class Watcher:
 
     def woke(self) -> None:
         """PC 가 잠들었다 깼다. 밀린 뉴스를 다 판별하면 요약을 알린다."""
-        self.wake_at = time.time()
+        self.wake_at = self.last_wake = time.time()
 
     def maybe_summarize(self):
         """깬 뒤 밀린 판별이 끝났으면 잠든 사이 중요 뉴스를 한 번에 알린다.
@@ -880,6 +927,16 @@ def make_handler(watcher: Watcher):
                 self.send_response(303)
                 self.send_header("Location", f"/?done={rec['id']}" + ("&all=1" if q.get("all") else ""))
                 self.end_headers()
+            elif u.path == "/ping":
+                # 확장의 감시견이 1분마다 보낸다. 판별기는 이것이 끊기면 수집이 멈춘 줄 안다
+                try:
+                    watcher.ext = {"at": time.time(), "watch": q.get("watch") == "1",
+                                   "tick": int(q.get("tick") or 0) / 1000, "tabs": int(q.get("tabs") or 0)}
+                except ValueError:
+                    pass
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
             elif u.path == "/judged.json":
                 # 확장 팝업이 판별한 뉴스를 흐리게 표시할 때 쓴다: {id: 점수}
                 data = json.dumps({k: v["score"] for k, v in watcher.judged.items()}).encode()
@@ -960,7 +1017,7 @@ SOURCE_NAMES = {"reuters": "Reuters", "로이터": "Reuters", "financial-juice":
 FB_LABELS = {"10": "🔔10점", "1": "👍", "0": "👎", "00": "🔕0점"}
 
 
-PAGE_LINES = 30   # 판별 목록 한 번에 보이는 줄 수. 같은 사건 묶음은 한 줄로 센다. "더 보기" 로 이만큼씩 늘린다
+PAGE_LINES = 50   # 판별 목록 한 번에 보이는 줄 수. 같은 사건 묶음은 한 줄로 센다. "더 보기" 로 이만큼씩 늘린다
 
 
 def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES) -> str:
@@ -1013,7 +1070,13 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
 
 
 def recent_alerts_html(watcher: Watcher) -> str:
-    """맨 위 "최근 알림" 줄. 목록은 기사 시각 순이라 늦게 들어온 알림이 아래에 묻힌다. 알린 시각 순으로 보인다."""
+    """맨 위 "최근 알림" 줄. 목록은 기사 시각 순이라 늦게 들어온 알림이 아래에 묻힌다. 알린 시각 순으로 보인다.
+    수집이 멈췄으면 그 경고를 맨 앞에 붙인다."""
+    warn = f"<div class=stall>⚠ 뉴스 수집이 멈췄습니다: {html.escape(watcher.problem)}</div>" if watcher.problem else ""
+    return warn + _recent_alerts(watcher)
+
+
+def _recent_alerts(watcher: Watcher) -> str:
     cutoff = (datetime.now(KST) - timedelta(hours=12)).isoformat(timespec="seconds")
     recs = sorted((r for r in watcher.judged.values() if r.get("alerted") and r.get("at", "") >= cutoff),
                   key=lambda r: r["at"], reverse=True)[:6]
@@ -1084,7 +1147,7 @@ body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16p
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
 .b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
-td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
+.stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
 </style>
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
@@ -1364,6 +1427,7 @@ def main():
     if cfg["moves"]:
         threading.Thread(target=moves_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=suggest_worker, args=(watcher,), daemon=True).start()
+    threading.Thread(target=health_worker, args=(watcher,), daemon=True).start()
     log(f"판별 목록: http://127.0.0.1:{cfg['port']}/")
     try:
         watcher.run()
