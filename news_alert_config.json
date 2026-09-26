@@ -20,5 +20,9 @@
  "tts_voice": "ko-KR-SunHiNeural",
  "tts_rate": "+0%",
  "tts_chime": "C:\\Windows\\Media\\Windows Notify Messaging.wav",
- "tts_quiet": ""
+ "tts_quiet": "",
+ "wake_gap_min": 10,
+ "summary_max": 5,
+ "moves": true,
+ "suggest_days": 7
 }

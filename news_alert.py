@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
@@ -46,6 +46,8 @@ CONFIG = BASE / "news_alert_config.json"
 INTERESTS = BASE / "interests.md"
 JUDGED = BASE / "news_judged.jsonl"      # 판별 기록 (재시작해도 다시 묻지 않게)
 FEEDBACK = BASE / "news_feedback.jsonl"  # 👍/👎 기록
+MOVES = BASE / "news_moves.jsonl"        # 뉴스 뒤 종목 시세 움직임
+SUGGEST = BASE / "interests_suggest.json"   # 관심사 고침 제안 (마지막 것)
 
 KST = timezone(timedelta(hours=9))
 
@@ -72,6 +74,10 @@ DEFAULTS = {
     "tts_rate": "+0%",
     "tts_chime": r"C:\Windows\Media\Windows Notify Messaging.wav",   # RSI 알림(Speech On)과 다른 소리
     "tts_quiet": "",               # 말하지 않을 시간대, 예: "23-07". 비우면 늘 말한다 (토스트는 그대로)
+    "wake_gap_min": 10,            # 감시 주기가 이만큼 끊겼으면 PC 가 잠들었다 깬 것으로 보고, 밀린 판별이 끝나면 요약을 알린다
+    "summary_max": 5,              # 요약에서 읽어 줄 뉴스 수
+    "moves": True,                 # 기준 점수 이상 뉴스의 종목 시세가 5분·30분 뒤 얼마나 움직였는지 적는다 (yfinance, 공개 시세)
+    "suggest_days": 7,             # 관심사 고침 제안을 이 날짜마다 한 번 만든다. 0 이면 버튼으로만
 }
 
 PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
@@ -289,20 +295,39 @@ def judge(cfg: dict, batch: list, topics: list = ()) -> tuple:
         topics="\n".join(topics) or "(없음)",
         news="\n".join(f"{i}. {news_line(r)}" for i, r in enumerate(batch, 1)),
     )
+    def check(text):
+        out = parse_results(text, batch)
+        # 절반도 못 매겼으면 형식을 어긴 답으로 보고 claude 에게 다시 묻는다
+        if len(out) * 2 < len(batch):
+            raise RuntimeError(f"결과 {len(out)}/{len(batch)}건만 읽힘")
+        return out
+    return ask_llm(cfg, prompt, check)
+
+
+def ask_llm(cfg: dict, prompt: str, check=lambda text: text) -> tuple:
+    """(check(답), 답한 쪽 이름). backend 가 auto 면 ollama 에 먼저 묻고, 안 되거나 check 가
+    거절하면 claude 에게 묻는다. 둘 다 JSON 으로 답하게 부른다."""
     backend = cfg["backend"]
     if backend in ("auto", "ollama"):
         timeout = cfg["ollama_timeout_sec"] if backend == "auto" else cfg["timeout_sec"]
         try:
-            out = parse_results(ask_ollama(cfg, prompt, timeout), batch)
-            # 절반도 못 매겼으면 형식을 어긴 답으로 보고 claude 에게 다시 묻는다
-            if len(out) * 2 < len(batch):
-                raise RuntimeError(f"결과 {len(out)}/{len(batch)}건만 읽힘")
-            return out, "ollama"
+            return check(ask_ollama(cfg, prompt, timeout)), "ollama"
         except Exception as e:
             if backend == "ollama":
                 raise
             log(f"ollama 실패 → claude: {str(e)[:120]}")
-    return parse_results(ask_claude(cfg, prompt), batch), "claude"
+    return check(ask_claude(cfg, prompt)), "claude"
+
+
+def parse_json(text: str) -> dict:
+    """LLM 답에서 JSON 객체를 꺼낸다. 앞뒤에 딴말이 붙어 있어도 읽는다."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -424,12 +449,222 @@ def toast(cfg: dict, r: dict, score: int, reason: str):
     n.show()
 
 
+# ─────────────────────────────────────────────────────────────
+# 뉴스 뒤 시세 움직임 (공개 시세만. 계좌는 보지 않는다)
+# ─────────────────────────────────────────────────────────────
+
+def price_moves(symbol: str, t0: datetime) -> dict:
+    """t0 직전 값에서 5분·30분 뒤 몇 % 움직였나. 장이 닫혀 있었으면 빈 dict.
+    프리·애프터 장도 본다. 1분봉은 최근 7일만 받을 수 있다."""
+    import yfinance as yf
+    h = yf.Ticker(symbol.replace(".", "-")).history(
+        start=t0 - timedelta(hours=1), end=t0 + timedelta(minutes=40), interval="1m", prepost=True)
+    if h.empty:
+        return {}
+    closes = h["Close"]
+
+    def at(t):
+        s = closes[closes.index <= t]
+        return (s.index[-1], float(s.iloc[-1])) if len(s) else (None, None)
+
+    i0, p0 = at(t0)
+    if i0 is None or t0 - i0 > timedelta(minutes=10):   # 뉴스 때 거래가 없었다 = 장이 닫혀 있었다
+        return {}
+    out = {"p0": round(p0, 4)}
+    for k, m in (("m5", 5), ("m30", 30)):
+        _, p = at(t0 + timedelta(minutes=m))
+        out[k] = round((p / p0 - 1) * 100, 2) if p else None
+    return out
+
+
+def moves_worker(watcher: "Watcher"):
+    """기준 점수 이상이거나 👍 받은 뉴스 가운데 종목이 붙은 것을, 나온 지 35분 뒤 시세를 받아 적는다."""
+    cfg = watcher.cfg
+    while True:
+        time.sleep(60)
+        try:
+            fb = {k: fb_key(v) for k, v in latest_feedback().items()}
+            now = datetime.now(timezone.utc)
+            # 종목은 CSV 에서 읽는다. 판별 기록에 종목을 적기 전에 판별한 뉴스도 있다
+            tickers = {n["id"]: n.get("tickers", "") for n in read_news(days=6)}
+            for r in list(watcher.judged.values()):
+                t0 = parse_ts(r.get("created_at", ""))
+                syms = (r.get("tickers") or tickers.get(r["id"], "")).split()
+                if (r["id"] in watcher.moves or not syms or not t0
+                        or not (r["score"] >= cfg["threshold"] or fb.get(r["id"]) in ("1", "10"))
+                        or not timedelta(minutes=35) < now - t0 < timedelta(days=6)):
+                    continue
+                got = {}
+                for sym in syms[:4]:
+                    try:
+                        m = price_moves(sym, t0)
+                    except Exception as e:
+                        log(f"시세 실패 {sym}: {type(e).__name__}: {str(e)[:80]}")
+                        continue
+                    if m:
+                        got[sym] = m
+                append_jsonl(MOVES, {"id": r["id"], "moves": got,
+                                     "at": datetime.now(KST).isoformat(timespec="seconds")})
+                watcher.moves[r["id"]] = got
+                shown = " ".join(f"{s} {move_text(m)}" for s, m in got.items())
+                if shown:
+                    log(f"📈 {shown}  {r['title'][:50]}")
+        except Exception as e:
+            log(f"시세 기록 오류: {type(e).__name__}: {e}")
+
+
+def move_text(m: dict) -> str:
+    """"+0.4% → +1.2%" (5분 → 30분)"""
+    f = lambda v: "?" if v is None else f"{v:+.1f}%"
+    return f"{f(m.get('m5'))} → {f(m.get('m30'))}"
+
+
+# ─────────────────────────────────────────────────────────────
+# 관심사 고침 제안 · 사건 흐름 요약
+# ─────────────────────────────────────────────────────────────
+
+SUGGEST_PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
+아래 [관심사]는 뉴스 점수를 매길 때 기준으로 쓰는 문서이고, [반응]은 최근 {days}일 동안 이 사람이 뉴스에 보인 반응이다.
+반응을 보고 [관심사]에 더하면 좋을 줄과, 빼거나 고치면 좋을 줄을 제안하라.
+- 👍·🔔 인데 점수가 낮았던 뉴스는 관심사에 빠진 것이 있다는 뜻일 수 있다
+- 👎·🔕 인데 점수가 높았던 뉴스는 관심사가 너무 넓거나 틀렸다는 뜻일 수 있다
+- 한두 건뿐이라 근거가 약하면 제안하지 마라. 제안할 것이 없으면 빈 목록으로 둬라
+- 계좌·보유 수량 같은 것은 묻지도 넣지도 마라
+
+[관심사]
+{interests}
+
+[반응] (점수 반응 제목)
+{rows}
+
+JSON 만 출력하라.
+{{"add": ["관심사에 더할 줄", ...], "remove": ["빼거나 고칠 줄 (관심사 원문 그대로) → 어떻게", ...], "why": "한두 문장"}}
+"""
+
+TOPIC_PROMPT = """아래는 "{topic}" 사건에 관한 뉴스 제목을 오래된 것부터 늘어놓은 것이다.
+사건이 어떻게 흘러왔는지 한국어 한두 문장(100자 안팎)으로 요약하라. 제목에 없는 내용은 지어내지 마라.
+
+{rows}
+
+JSON 만 출력하라. {{"summary": "요약"}}
+"""
+
+
+def make_suggestion(watcher: "Watcher") -> dict:
+    """최근 반응으로 관심사 고침 제안을 만들어 SUGGEST 에 적는다. 반응이 적으면 만들지 않는다."""
+    days = watcher.cfg["suggest_days"] or 7
+    cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds")
+    marks = {"10": "🔔", "1": "👍", "0": "👎", "00": "🔕"}
+    rows = []
+    for rec in sorted(latest_feedback().values(), key=lambda x: x.get("at", ""), reverse=True):
+        k, j = fb_key(rec), watcher.judged.get(rec["id"])
+        if k and j and rec.get("at", "") >= cutoff:
+            rows.append(f"{j['score']:>2} {marks[k]} {j['title']}")
+    if len(rows) < 5:
+        raise RuntimeError(f"최근 {days}일 반응이 {len(rows)}건뿐이라 제안하지 않는다 (5건 이상 필요)")
+    prompt = SUGGEST_PROMPT.format(
+        days=days, interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
+        rows="\n".join(rows[:80]))
+
+    def check(text):
+        d = parse_json(text)
+        if not isinstance(d.get("add"), list) or not isinstance(d.get("remove"), list):
+            raise RuntimeError("add/remove 가 없다")
+        return d
+    d, by = ask_llm(watcher.cfg, prompt, check)
+    out = {"at": datetime.now(KST).isoformat(timespec="seconds"), "days": days, "n": len(rows), "by": by,
+           "add": [str(x) for x in d["add"]], "remove": [str(x) for x in d["remove"]],
+           "why": str(d.get("why", ""))}
+    SUGGEST.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    log(f"💡 관심사 고침 제안: 더할 것 {len(out['add'])} · 고칠 것 {len(out['remove'])} ({by})")
+    return out
+
+
+def read_suggestion() -> dict:
+    try:
+        return json.loads(SUGGEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def suggest_worker(watcher: "Watcher"):
+    """suggest_days 마다 한 번 제안을 만들고 토스트로 알린다."""
+    days = watcher.cfg["suggest_days"]
+    if not days:
+        return
+    while True:
+        last = read_suggestion().get("at", "")
+        if last < (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds"):
+            try:
+                s = make_suggestion(watcher)
+                if s["add"] or s["remove"]:
+                    plain_toast(watcher.cfg, "관심사 고침 제안이 있습니다",
+                                f"더할 것 {len(s['add'])} · 고칠 것 {len(s['remove'])}", "/stats")
+            except Exception as e:
+                log(f"관심사 제안 건너뜀: {e}")
+                # 반응이 모자라면 하루 뒤에 다시 본다
+                time.sleep(86400)
+                continue
+        time.sleep(3600)
+
+
+def topic_summary(watcher: "Watcher", topic: str) -> str:
+    recs = topic_records(watcher, topic)
+    if len(recs) < 2:
+        return "뉴스가 한 건뿐이라 요약할 흐름이 없습니다."
+    key = (topic, len(recs))
+    if key not in watcher.summaries:
+        rows = "\n".join(f"{parse_ts(r['created_at']).astimezone(KST):%m-%d %H:%M} {r['title']}"
+                         for r in recs[-40:])
+
+        def check(text):
+            s = str(parse_json(text).get("summary", "")).strip()
+            if not s:
+                raise RuntimeError("summary 가 비었다")
+            return s
+        watcher.summaries[key], _ = ask_llm(watcher.cfg, TOPIC_PROMPT.format(topic=topic, rows=rows), check)
+    return watcher.summaries[key]
+
+
+def topic_records(watcher: "Watcher", topic: str) -> list:
+    """이 사건 이름을 단 뉴스, 오래된 것부터 (최근 3일)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+    recs = [r for r in watcher.judged.values()
+            if r.get("topic") == topic and (parse_ts(r.get("created_at", "")) or cutoff) >= cutoff]
+    return sorted(recs, key=lambda r: r.get("created_at", ""))
+
+
+def plain_toast(cfg: dict, title: str, msg: str, path: str = "/"):
+    try:
+        from winotify import Notification
+    except ImportError:
+        return
+    Notification(app_id="SaveTicker 뉴스", title=title, msg=msg,
+                 launch=f"http://127.0.0.1:{cfg['port']}{path}").show()
+
+
+def summary_toast(cfg: dict, n: int, top: list):
+    try:
+        from winotify import Notification, audio
+    except ImportError:
+        return
+    lines = "\n".join(f"{r['score']}  {r.get('say') or r['title'][:30]}" for r in top)
+    note = Notification(app_id="SaveTicker 뉴스", title=f"잠든 사이 중요 뉴스 {n}건",
+                        msg=lines, launch=f"http://127.0.0.1:{cfg['port']}/")
+    speaking = cfg["tts"] and not quiet_now(cfg)
+    note.set_audio(audio.Silent if speaking else audio.Default, loop=False)
+    note.show()
+
+
 class Watcher:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.judged = {rec["id"]: rec for rec in read_jsonl(JUDGED)}
         self.recent_alerts = []   # (시각, 제목) — 비슷한 후속 보도를 거르려고
         self.first_seen = {}      # id → 처음 본 시각
+        self.wake_at = None       # PC 가 잠들었다 깬 시각. 밀린 판별이 끝나면 요약을 알리고 비운다
+        self.moves = {m["id"]: m["moves"] for m in read_jsonl(MOVES)}   # id → {종목: {p0, m5, m30}}
+        self.summaries = {}       # (사건 이름, 건수) → 흐름 요약. 뉴스가 늘면 다시 만든다
 
     def is_dup(self, title: str) -> bool:
         cutoff = time.time() - 3600
@@ -505,7 +740,7 @@ class Watcher:
                          and not self.is_dup(r["title"]))
                 rec = {"id": r["id"], "title": r["title"], "url": r["url"], "source": r.get("source", ""),
                        "created_at": r["created_at"], "score": score, "reason": reason, "topic": topic,
-                       "say": say, "alerted": alert, "late": late, "by": by,
+                       "say": say, "tickers": r.get("tickers", ""), "alerted": alert, "late": late, "by": by,
                        "at": datetime.now(KST).isoformat(timespec="seconds")}
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
@@ -516,14 +751,61 @@ class Watcher:
                     toast(self.cfg, r, score, reason)
                     say_alert(self.cfg, say or topic or reason)
 
+    def woke(self) -> None:
+        """PC 가 잠들었다 깼다. 밀린 뉴스를 다 판별하면 요약을 알린다."""
+        self.wake_at = time.time()
+
+    def maybe_summarize(self):
+        """깬 뒤 밀린 판별이 끝났으면 잠든 사이 중요 뉴스를 한 번에 알린다.
+        확장이 빈 시간을 거슬러 받아올 틈을 3분 주고, 30분이 넘으면 끝나지 않았어도 알린다."""
+        if not self.wake_at:
+            return
+        since = time.time() - self.wake_at
+        if since < 180:
+            return
+        if since < 1800 and any(self.is_late(r) for r in self.pending()):
+            return
+        woke = datetime.fromtimestamp(self.wake_at, KST).isoformat(timespec="seconds")
+        self.wake_at = None
+        # 잠들기 전에 이미 알린 사건은 뺀다
+        told = {r.get("topic") for r in self.recent(self.cfg["catchup_hours"])
+                if r.get("alerted") and r.get("topic")}
+        picks, topics = [], set()
+        for r in sorted(self.judged.values(), key=lambda r: (-r["score"], r.get("created_at", ""))):
+            tp = r.get("topic")
+            if (not r.get("late") or r.get("at", "") < woke or r["score"] < self.cfg["threshold"]
+                    or (tp and (tp in told or tp in topics))):
+                continue
+            picks.append(r)
+            if tp:
+                topics.add(tp)
+        if not picks:
+            log("잠든 사이 중요 뉴스 없음")
+            return
+        n, top = len(picks), picks[:self.cfg["summary_max"]]
+        says = [r.get("say") or r.get("topic") or r["title"][:20] for r in top]
+        text = f"잠든 사이 중요 뉴스 {n}건. " + ", ".join(says) + (f", 외 {n - len(top)}건" if n > len(top) else "")
+        log(f"🌙 {text}")
+        summary_toast(self.cfg, n, top)
+        say_alert(self.cfg, text)
+
     def run(self):
         log(f"감시 시작: {DATA}  (모델 {self.cfg['model']}, 기준 {self.cfg['threshold']}점)")
+        # 켜자마자 밀린 뉴스가 있으면(밤새 꺼져 있다가 부팅) 깬 것과 같이 본다
+        if any(self.is_late(r) for r in self.pending()):
+            self.woke()
         while True:
             try:
                 self.step()
+                self.maybe_summarize()
             except Exception as e:   # 한 번의 오류로 감시가 멈추지 않게
                 log(f"오류: {type(e).__name__}: {e}")
+            # 잠깐 쉬는 사이 벽시계가 크게 건너뛰었으면 PC 가 잠들었다 깬 것이다
+            t = time.time()
             time.sleep(self.cfg["poll_sec"])
+            if time.time() - t > self.cfg["wake_gap_min"] * 60:
+                log(f"감시가 {(time.time() - t) / 60:.0f}분 끊겼다 (PC 절전으로 봄). 밀린 뉴스를 판별하고 요약한다")
+                self.woke()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -572,24 +854,44 @@ def make_handler(watcher: Watcher):
                 self.wfile.write(data)
             elif u.path == "/":
                 self.send_page(page(watcher, q.get("done"), bool(q.get("all"))))
+            elif u.path == "/stats":
+                self.send_page(stats_page(watcher))
+            elif u.path == "/topic" and q.get("name"):
+                self.send_page(topic_page(watcher, q["name"]))
+            elif u.path == "/topic_summary" and q.get("name"):
+                # LLM 을 부르니 사용자 정의 헤더가 있을 때만 (다른 사이트가 몰래 부르지 못하게)
+                if self.headers.get("X-Page") != "yes":
+                    return self.send_page("bad request", 400)
+                try:
+                    self.send_json({"summary": topic_summary(watcher, q["name"])})
+                except Exception as e:
+                    self.send_json({"error": f"{type(e).__name__}: {str(e)[:150]}"})
             else:
                 self.send_page("not found", 404)
 
-        def do_POST(self):
-            # 처음부터 다시: 페이지에서 한 번 더 확인받은 뒤에만 온다.
-            # 다른 사이트가 몰래 보내지 못하게 사용자 정의 헤더를 요구한다 (브라우저가 막는다).
-            u = urlparse(self.path)
-            q = {k: v[0] for k, v in parse_qs(u.query).items()}
-            if u.path != "/reset" or self.headers.get("X-Reset") != "yes" or q.get("what") not in ("feedback", "all"):
-                self.send_page("bad request", 400)
-                return
-            moved = reset_records(watcher, q["what"])
-            data = json.dumps({"moved": moved}, ensure_ascii=False).encode()
+        def send_json(self, obj):
+            data = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def do_POST(self):
+            # 처음부터 다시·관심사 제안: 페이지의 버튼으로만 온다.
+            # 다른 사이트가 몰래 보내지 못하게 사용자 정의 헤더를 요구한다 (브라우저가 막는다).
+            u = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path == "/suggest" and self.headers.get("X-Page") == "yes":
+                try:
+                    self.send_json(make_suggestion(watcher))
+                except Exception as e:
+                    self.send_json({"error": str(e)[:200]})
+                return
+            if u.path != "/reset" or self.headers.get("X-Reset") != "yes" or q.get("what") not in ("feedback", "all"):
+                self.send_page("bad request", 400)
+                return
+            self.send_json({"moved": reset_records(watcher, q["what"])})
     return H
 
 
@@ -653,13 +955,39 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
         # 가장 오래된 뉴스를 섞는다. 새 뉴스는 위에 붙으니 자동 갱신 뒤에도 id 가 그대로다.
         gid = (hashlib.md5(f"{head.get('topic', '')}|{kids[-1]['id']}".encode()).hexdigest()[:10]
                if kids else "")
-        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids))
-        rows.extend(row_html(k, fb, done, qs, child_of=gid) for k in kids)
+        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves))
+        rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves) for k in kids)
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
-    return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v))
+    return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v),
+                     recent_alerts_html(watcher))
 
 
-def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "") -> str:
+def recent_alerts_html(watcher: Watcher) -> str:
+    """맨 위 "최근 알림" 줄. 목록은 기사 시각 순이라 늦게 들어온 알림이 아래에 묻힌다. 알린 시각 순으로 보인다."""
+    cutoff = (datetime.now(KST) - timedelta(hours=12)).isoformat(timespec="seconds")
+    recs = sorted((r for r in watcher.judged.values() if r.get("alerted") and r.get("at", "") >= cutoff),
+                  key=lambda r: r["at"], reverse=True)[:6]
+    if not recs:
+        return "<span class=why>최근 12시간 알림 없음</span>"
+    items = [f"<a href='{html.escape(r['url'])}' target=_blank title='{html.escape(r['title'])}'>"
+             f"<span class=why>{r['at'][11:16]}</span> <b>{r['score']}</b> "
+             f"{html.escape(r.get('say') or r['title'][:30])}</a>" for r in recs]
+    return "<span class=why>최근 알림</span> " + " <span class=why>·</span> ".join(items)
+
+
+def moves_html(moves: dict) -> str:
+    """종목별 5분 → 30분 움직임 칩. 30분 뒤가 ±1% 넘으면 색을 입힌다."""
+    out = []
+    for sym, m in moves.items():
+        v = m.get("m30")
+        cls = "mv up" if v is not None and v >= 1 else "mv dn" if v is not None and v <= -1 else "mv"
+        out.append(f"<span class='{cls}' title='뉴스 시각 {m.get('p0')} 에서 5분 뒤 → 30분 뒤'>"
+                   f"{html.escape(sym)} {move_text(m)}</span>")
+    return "".join(out)
+
+
+def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "",
+             moves: dict = None) -> str:
     t = parse_ts(r.get("created_at", ""))
     when = t.astimezone(KST).strftime("%m-%d %H:%M") if t else ""
     state = fb.get(r["id"])   # "10" / "1" / "0" / "00" / None
@@ -676,7 +1004,10 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
     # 누가 판별했는지: 🦙 Ollama, ✴ Claude
     by = {"ollama": "<div class=by title='Ollama 가 판별'>🦙</div>",
           "claude": "<div class='by cl' title='Claude 가 판별'>✴</div>"}.get(r.get("by"), "")
-    topic = f"<span class=tp>{html.escape(r['topic'])}</span>" if r.get("topic") else ""
+    # 사건 이름을 누르면 그 사건의 타임라인
+    topic = (f"<a class=tp href='/topic?name={quote(r['topic'])}' target=_blank title='사건 타임라인'>"
+             f"{html.escape(r['topic'])}</a>" if r.get("topic") else "")
+    mv = moves_html((moves or {}).get(r["id"]) or {})
     source = SOURCE_NAMES.get(r.get("source", ""), r.get("source", ""))
     src = f"<span class=src>{html.escape(source)}</span>" if source else ""
     # 누른 버튼은 불이 켜지고, 다시 누르면 취소된다.
@@ -689,10 +1020,11 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
         f"<tr{cls}><td class=b>{btns}</td>"
         f"<td class=t>{when}</td><td class=s>{r['score']}{by}</td>"
         f"<td><a{' class=rated' if state else ''} href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
-        f"<div class=why>{src}{topic}{html.escape(r.get('reason', ''))}{group}</div></td></tr>")
+        f"<div class=why>{src}{topic}{html.escape(r.get('reason', ''))}{mv}{group}</div></td></tr>")
 
 
-def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int) -> str:
+def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int,
+              recent: str = "") -> str:
     note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다. "
     note += ("<a href='/' style='text-decoration:underline'>숨기기</a></p>" if show_all else
              f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다. <a href='/?all=1' style='text-decoration:underline'>모두 보기</a></p>")
@@ -702,9 +1034,12 @@ body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16p
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
 .b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
+a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
+#recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
 </style>
-<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small></h2>
+<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
+<div id=recent>{recent}</div>
 {note}<p class=why id=upd></p><table id=list>{''.join(rows)}</table>
 <p class="why reset">처음부터 다시 ·
   <a id=reset-feedback data-n="{n_fb}">반응 기록 지우기 ({n_fb}건)</a> ·
@@ -722,7 +1057,7 @@ async function resetRecords(what, msg) {{
 document.getElementById("reset-feedback").onclick = (e) => resetRecords("feedback",
   "🔔10·👍·👎·🔕0 반응 기록 " + e.target.dataset.n + "건을 지웁니다.\\n판별기는 관심사(interests.md)만 보고 처음부터 다시 배웁니다.");
 document.getElementById("reset-all").onclick = (e) => resetRecords("all",
-  "반응 기록 " + e.target.dataset.n + "건과 판별 기록 " + e.target.dataset.j + "건을 모두 지웁니다.\\n목록이 비고, 최근 60분 안의 뉴스는 다시 판별합니다.");
+  "반응 기록 " + e.target.dataset.n + "건과 판별 기록 " + e.target.dataset.j + "건을 모두 지웁니다.\\n목록이 비고, 최근 12시간 안의 뉴스는 다시 판별합니다 (알림은 60분 안의 것만).");
 
 // 15초마다 목록만 바꿔 끼운다. 스크롤 위치는 그대로 남는다.
 // 방금 누른 뉴스는 10초 동안 목록에 남긴다 (👎 해도 바로 사라지지 않게, 잘못 누르면 되돌릴 수 있게)
@@ -735,6 +1070,7 @@ async function refresh() {{
     const r = await fetch("/?" + params, {{cache: "no-store"}});
     const doc = new DOMParser().parseFromString(await r.text(), "text/html");
     document.getElementById("list").innerHTML = doc.getElementById("list").innerHTML;
+    document.getElementById("recent").innerHTML = doc.getElementById("recent").innerHTML;
     applyOpen();
     document.getElementById("upd").textContent = "자동 갱신 " + new Date().toLocaleTimeString("ko-KR", {{hour12: false}});
   }} catch (e) {{
@@ -777,6 +1113,136 @@ document.getElementById("list").addEventListener("click", async (e) => {{
     location.href = a.href;   // 스크립트로 안 되면 예전처럼 페이지 이동
   }}
 }});
+</script>"""
+
+
+SUB_CSS = """<style>
+body{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px;max-width:1100px}
+table{border-collapse:collapse;margin:8px 0 20px} td,th{padding:5px 10px;border-bottom:1px solid #2a2d33;text-align:left;vertical-align:top}
+th{color:#8a9099;font-weight:500} td.n{text-align:right} tr.cur{background:#1d2a45}
+a{color:#e6e6e6;text-decoration:none} a:hover{text-decoration:underline} .why{color:#8a9099;font-size:12px}
+h3{margin:24px 0 4px} .box{padding:10px 12px;border-radius:8px;background:#1d2127;line-height:1.7}
+button{background:#2a3d5c;color:#e6e6e6;border:1px solid #6d8fd6;border-radius:6px;padding:4px 12px;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait} .add{color:#8fd18f} .rm{color:#f0a36c}
+.mv{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}
+.mv.up{background:#1f3a26;color:#8fd18f} .mv.dn{background:#3d2323;color:#f08c8c}
+</style>"""
+
+
+def _pct(a: int, b: int) -> str:
+    return f"{a * 100 // b}%" if b else "-"
+
+
+def stats_page(watcher: Watcher) -> str:
+    """점수 성적표: 점수와 반응(👍👎)·시세 움직임을 맞대어 기준 점수가 맞는지 본다."""
+    th = watcher.cfg["threshold"]
+    fb = {k: fb_key(v) for k, v in latest_feedback().items()}
+    recs = list(watcher.judged.values())
+    good = lambda r: fb.get(r["id"]) in ("1", "10")
+    bad = lambda r: fb.get(r["id"]) in ("0", "00")
+
+    def big(r):   # 30분 뒤 가장 크게 움직인 종목의 |%|
+        ms = [abs(m["m30"]) for m in (watcher.moves.get(r["id"]) or {}).values() if m.get("m30") is not None]
+        return max(ms) if ms else None
+
+    ats = sorted(r.get("at", "") for r in recs if r.get("at"))
+    span = 1.0
+    if len(ats) > 1:
+        span = max(1.0, (datetime.fromisoformat(ats[-1]) - datetime.fromisoformat(ats[0])).total_seconds() / 86400)
+
+    t1 = []
+    for name, lo, hi in (("0~3", 0, 3), ("4~6", 4, 6), ("7~8", 7, 8), ("9~10", 9, 10)):
+        rs = [r for r in recs if lo <= r["score"] <= hi]
+        rated = [r for r in rs if fb.get(r["id"])]
+        g = sum(1 for r in rated if good(r))
+        mv = [x for x in map(big, rs) if x is not None]
+        t1.append(f"<tr><td>{name}점</td><td class=n>{len(rs)}</td><td class=n>{sum(1 for r in rs if r.get('alerted'))}</td>"
+                  f"<td class=n>{len(rated)}</td><td class=n>{g}</td><td class=n>{len(rated) - g}</td>"
+                  f"<td class=n>{_pct(g, len(rated))}</td>"
+                  f"<td class=n>{f'{sum(mv) / len(mv):.1f}% ({len(mv)}건)' if mv else '-'}</td></tr>")
+
+    t2 = []
+    for t in range(5, 10):
+        would = [r for r in recs if r["score"] >= t and not r.get("late")]
+        missed = sum(1 for r in recs if good(r) and r["score"] < t)
+        t2.append(f"<tr{' class=cur' if t == th else ''}><td>{t}점{' (지금)' if t == th else ''}</td>"
+                  f"<td class=n>{len(would) / span:.0f}</td><td class=n>{sum(1 for r in would if bad(r))}</td>"
+                  f"<td class=n>{missed}</td></tr>")
+
+    def items(rs):
+        rs = sorted(rs, key=lambda r: r.get("created_at", ""), reverse=True)[:12]
+        return "".join(f"<tr><td class=n>{r['score']}</td><td><a href='{html.escape(r['url'])}' target=_blank>"
+                       f"{html.escape(r['title'])}</a> <span class=why>{html.escape(r.get('reason', ''))}</span></td></tr>"
+                       for r in rs) or "<tr><td class=why>없음</td></tr>"
+
+    missed = items(r for r in recs if good(r) and r["score"] < th)
+    false = items(r for r in recs if r.get("alerted") and bad(r))
+
+    s = read_suggestion()
+    if s:
+        sug = (f"<p class=why>{s['at'][:16].replace('T', ' ')} · 최근 {s['days']}일 반응 {s['n']}건 · {s['by']}</p>"
+               + "".join(f"<div class=add>+ {html.escape(x)}</div>" for x in s["add"])
+               + "".join(f"<div class=rm>− {html.escape(x)}</div>" for x in s["remove"])
+               + (f"<p>{html.escape(s['why'])}</p>" if s.get("why") else "")
+               + ("" if s["add"] or s["remove"] else "<p>고칠 것 없음</p>"))
+    else:
+        sug = "<p class=why>아직 만든 제안이 없습니다.</p>"
+    every = watcher.cfg["suggest_days"]
+    return f"""<!doctype html><meta charset=utf-8><title>점수 성적표</title>{SUB_CSS}
+<h2>점수 성적표 <small class=why>판별 {len(recs)}건 · 반응 {sum(1 for r in recs if fb.get(r['id']))}건 · 약 {span:.1f}일치 · 기준 {th}점</small></h2>
+<p class=why>👍·🔔10 은 "좋음", 👎·🔕0 은 "싫음"으로 셉니다. 시세는 종목이 붙은 뉴스의 30분 뒤 움직임(가장 크게 움직인 종목, 절댓값) 평균입니다.</p>
+<h3>점수대별</h3>
+<table><tr><th>점수</th><th>판별</th><th>알림</th><th>반응</th><th>좋음</th><th>싫음</th><th>좋음 비율</th><th>30분 뒤 움직임</th></tr>{''.join(t1)}</table>
+<h3>기준 점수를 바꾸면</h3>
+<p class=why>하루 알림 수는 늦게 잡힌 뉴스를 빼고, 같은 사건 거르기 전의 수라 실제보다 많습니다.</p>
+<table><tr><th>기준</th><th>하루 알림</th><th>그중 싫음</th><th>놓치는 좋음</th></tr>{''.join(t2)}</table>
+<h3>놓친 뉴스 <small class=why>좋음인데 {th}점 미만</small></h3><table>{missed}</table>
+<h3>헛알림 <small class=why>알렸는데 싫음</small></h3><table>{false}</table>
+<h3>관심사 고침 제안 <small class=why>{f'{every}일마다 자동' if every else '버튼으로만'} · interests.md 는 직접 고치셔야 합니다</small></h3>
+<div class=box id=sug>{sug}</div><p><button id=go>지금 제안 받기</button> <span class=why id=st></span></p>
+<script>
+document.getElementById("go").onclick = async (e) => {{
+  e.target.disabled = true;
+  document.getElementById("st").textContent = "LLM 에게 묻는 중… (10초~1분)";
+  try {{
+    const d = await (await fetch("/suggest", {{method: "POST", headers: {{"X-Page": "yes"}}}})).json();
+    if (d.error) document.getElementById("st").textContent = d.error;
+    else location.reload();
+  }} catch (err) {{
+    document.getElementById("st").textContent = "실패: " + err;
+  }}
+  e.target.disabled = false;
+}};
+</script>"""
+
+
+def topic_page(watcher: Watcher, name: str) -> str:
+    """한 사건의 뉴스를 시간순으로. 흐름 요약은 버튼을 눌러야 LLM 에게 묻는다."""
+    recs = topic_records(watcher, name)
+    rows = []
+    for r in recs:
+        t = parse_ts(r.get("created_at", ""))
+        mark = "🔔 " if r.get("alerted") else ""
+        rows.append(f"<tr><td class=why>{t.astimezone(KST):%m-%d %H:%M}</td><td class=n>{mark}{r['score']}</td>"
+                    f"<td><a href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
+                    f"<div class=why>{html.escape(r.get('reason', ''))}"
+                    f"{moves_html(watcher.moves.get(r['id']) or {})}</div></td></tr>")
+    known = watcher.summaries.get((name, len(recs)), "")
+    return f"""<!doctype html><meta charset=utf-8><title>{html.escape(name)}</title>{SUB_CSS}
+<h2>{html.escape(name)} <small class=why>최근 3일 {len(recs)}건 · 오래된 것부터</small></h2>
+<div class=box id=sum>{html.escape(known) or '<span class=why>흐름 요약은 아래 버튼을 누르면 만듭니다.</span>'}</div>
+<p><button id=go data-name="{html.escape(name)}"{' hidden' if known or len(recs) < 2 else ''}>흐름 요약</button></p>
+<table>{''.join(rows) or '<tr><td class=why>이 이름의 뉴스가 없습니다</td></tr>'}</table>
+<script>
+document.getElementById("go").onclick = async (e) => {{
+  e.target.disabled = true;
+  document.getElementById("sum").textContent = "LLM 에게 묻는 중…";
+  const r = await fetch("/topic_summary?name=" + encodeURIComponent(e.target.dataset.name), {{headers: {{"X-Page": "yes"}}}});
+  const d = await r.json();
+  document.getElementById("sum").textContent = d.summary || d.error;
+  e.target.hidden = !!d.summary;
+  e.target.disabled = false;
+}};
 </script>"""
 
 
@@ -832,6 +1298,9 @@ def main():
         sys.exit(3)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=_speech_worker, args=(cfg,), daemon=True).start()
+    if cfg["moves"]:
+        threading.Thread(target=moves_worker, args=(watcher,), daemon=True).start()
+    threading.Thread(target=suggest_worker, args=(watcher,), daemon=True).start()
     log(f"판별 목록: http://127.0.0.1:{cfg['port']}/")
     try:
         watcher.run()
