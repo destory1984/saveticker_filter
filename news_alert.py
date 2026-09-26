@@ -48,6 +48,7 @@ JUDGED = BASE / "news_judged.jsonl"      # 판별 기록 (재시작해도 다시
 FEEDBACK = BASE / "news_feedback.jsonl"  # 👍/👎 기록
 MOVES = BASE / "news_moves.jsonl"        # 뉴스 뒤 종목 시세 움직임
 SUGGEST = BASE / "interests_suggest.json"   # 관심사 고침 제안 (마지막 것)
+BRIEFING = BASE / "briefing.json"        # 장 열기 전 브리핑 (마지막 것)
 
 KST = timezone(timedelta(hours=9))
 
@@ -76,8 +77,11 @@ DEFAULTS = {
     "tts_quiet": "",               # 말하지 않을 시간대, 예: "23-07". 비우면 늘 말한다 (토스트는 그대로)
     "wake_gap_min": 10,            # 감시 주기가 이만큼 끊겼으면 PC 가 잠들었다 깬 것으로 보고, 밀린 판별이 끝나면 요약을 알린다
     "summary_max": 5,              # 요약에서 읽어 줄 뉴스 수
-    "moves": True,                 # 기준 점수 이상 뉴스의 종목 시세가 5분·30분 뒤 얼마나 움직였는지 적는다 (yfinance, 공개 시세)
+    "moves": True,                 # 뉴스 뒤 5분·30분 시세 움직임을 적는다 (yfinance, 공개 시세). 시장은 모든 뉴스, 종목은 기준 점수 이상만
     "suggest_days": 7,             # 관심사 고침 제안을 이 날짜마다 한 번 만든다. 0 이면 버튼으로만
+    "briefing_at": "22:00",        # 평일 이 시각(한국)에 장 열기 전 브리핑. 비우면 안 한다. 미국 서머타임이 끝나면 "23:00" 권함
+    "briefing_hours": 12,          # 브리핑에 담을 기간
+    "briefing_max": 5,             # 브리핑에서 읽어 줄 사건 수
     "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
 }
 
@@ -458,15 +462,29 @@ def toast(cfg: dict, r: dict, score: int, reason: str):
 # 뉴스 뒤 시세 움직임 (공개 시세만. 계좌는 보지 않는다)
 # ─────────────────────────────────────────────────────────────
 
-def price_moves(symbol: str, t0: datetime) -> dict:
-    """t0 직전 값에서 5분·30분 뒤 몇 % 움직였나. 장이 닫혀 있었으면 빈 dict.
-    프리·애프터 장도 본다. 1분봉은 최근 7일만 받을 수 있다."""
+# 종목이 없는 뉴스(금리·유가·관세 따위)에도 시장이 어떻게 반응했는지 본다. 이름 → (심볼, 단위)
+MARKET = {"나스닥": ("QQQ", "pct"), "반도체": ("SOXX", "pct"), "10년물": ("^TNX", "bp"), "유가": ("USO", "pct")}
+
+
+def _bars(symbol: str, t0: datetime, cache: dict):
+    """t0 가 든 날(UTC)의 1분봉 종가. 같은 날 뉴스끼리 나눠 쓰도록 cache 에 둔다."""
     import yfinance as yf
-    h = yf.Ticker(symbol.replace(".", "-")).history(
-        start=t0 - timedelta(hours=1), end=t0 + timedelta(minutes=40), interval="1m", prepost=True)
-    if h.empty:
+    day = t0.astimezone(timezone.utc).date()
+    key = (symbol, day)
+    if key not in cache:
+        start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+        h = yf.Ticker(symbol.replace(".", "-")).history(
+            start=start - timedelta(hours=2), end=start + timedelta(days=1, hours=2), interval="1m", prepost=True)
+        cache[key] = None if h.empty else h["Close"]
+    return cache[key]
+
+
+def price_moves(symbol: str, t0: datetime, cache: dict = None, unit: str = "pct") -> dict:
+    """t0 직전 값에서 5분·30분 뒤 얼마나 움직였나. unit 이 "pct" 면 %, "bp" 면 수익률 차이(bp).
+    장이 닫혀 있었으면 빈 dict. 프리·애프터 장도 본다. 1분봉은 최근 7일만 받을 수 있다."""
+    closes = _bars(symbol, t0, {} if cache is None else cache)
+    if closes is None:
         return {}
-    closes = h["Close"]
 
     def at(t):
         s = closes[closes.index <= t]
@@ -477,50 +495,79 @@ def price_moves(symbol: str, t0: datetime) -> dict:
         return {}
     out = {"p0": round(p0, 4)}
     for k, m in (("m5", 5), ("m30", 30)):
-        _, p = at(t0 + timedelta(minutes=m))
-        out[k] = round((p / p0 - 1) * 100, 2) if p else None
+        i, p = at(t0 + timedelta(minutes=m))
+        if p is None or i <= i0:
+            out[k] = None if p is None else 0.0
+        elif unit == "bp":
+            out[k] = round((p - p0) * 100, 1)   # ^TNX 는 수익률(%) 그대로다. 0.01 = 1bp
+        else:
+            out[k] = round((p / p0 - 1) * 100, 2)
+    if unit == "bp":
+        out["unit"] = "bp"
     return out
 
 
 def moves_worker(watcher: "Watcher"):
-    """기준 점수 이상이거나 👍 받은 뉴스 가운데 종목이 붙은 것을, 나온 지 35분 뒤 시세를 받아 적는다."""
+    """나온 지 35분 지난 뉴스의 시세를 적는다.
+    시장(나스닥·반도체·10년물·유가)은 판별한 모든 뉴스에 적는다. 점수가 낮은 뉴스와 견줘야
+    "점수가 높을수록 시장이 더 움직였나" 를 볼 수 있다. 하루치 1분봉을 한 번 받아 나눠 쓰니 가볍다.
+    종목은 기준 점수 이상이거나 👍 받은 뉴스에 종목이 붙어 있을 때만 적는다."""
     cfg = watcher.cfg
     while True:
         time.sleep(60)
         try:
             fb = {k: fb_key(v) for k, v in latest_feedback().items()}
             now = datetime.now(timezone.utc)
+            cache = {}   # 한 차례 안에서만 나눠 쓴다. 오늘 1분봉은 계속 늘어난다
             # 종목은 CSV 에서 읽는다. 판별 기록에 종목을 적기 전에 판별한 뉴스도 있다
             tickers = {n["id"]: n.get("tickers", "") for n in read_news(days=6)}
             for r in list(watcher.judged.values()):
                 t0 = parse_ts(r.get("created_at", ""))
-                syms = (r.get("tickers") or tickers.get(r["id"], "")).split()
-                if (r["id"] in watcher.moves or not syms or not t0
-                        or not (r["score"] >= cfg["threshold"] or fb.get(r["id"]) in ("1", "10"))
-                        or not timedelta(minutes=35) < now - t0 < timedelta(days=6)):
+                if not t0 or not timedelta(minutes=35) < now - t0 < timedelta(days=6):
                     continue
-                got = {}
-                for sym in syms[:4]:
-                    try:
-                        m = price_moves(sym, t0)
-                    except Exception as e:
-                        log(f"시세 실패 {sym}: {type(e).__name__}: {str(e)[:80]}")
-                        continue
-                    if m:
-                        got[sym] = m
-                append_jsonl(MOVES, {"id": r["id"], "moves": got,
-                                     "at": datetime.now(KST).isoformat(timespec="seconds")})
-                watcher.moves[r["id"]] = got
-                shown = " ".join(f"{s} {move_text(m)}" for s, m in got.items())
-                if shown:
-                    log(f"📈 {shown}  {r['title'][:50]}")
+                syms = (r.get("tickers") or tickers.get(r["id"], "")).split()
+                keen = r["score"] >= cfg["threshold"] or fb.get(r["id"]) in ("1", "10")
+                need_t = keen and syms and r["id"] not in watcher.moves
+                need_m = r["id"] not in watcher.market
+                if not need_t and not need_m:
+                    continue
+                rec = {"id": r["id"]}
+                if need_t:
+                    rec["moves"] = {}
+                    for sym in syms[:4]:
+                        try:
+                            m = price_moves(sym, t0, cache)
+                        except Exception as e:
+                            log(f"시세 실패 {sym}: {type(e).__name__}: {str(e)[:80]}")
+                            continue
+                        if m:
+                            rec["moves"][sym] = m
+                    watcher.moves[r["id"]] = rec["moves"]
+                if need_m:
+                    rec["market"] = {}
+                    for name, (sym, unit) in MARKET.items():
+                        try:
+                            m = price_moves(sym, t0, cache, unit)
+                        except Exception as e:
+                            log(f"시세 실패 {sym}: {type(e).__name__}: {str(e)[:80]}")
+                            continue
+                        if m:
+                            rec["market"][name] = m
+                    watcher.market[r["id"]] = rec["market"]
+                rec["at"] = datetime.now(KST).isoformat(timespec="seconds")
+                append_jsonl(MOVES, rec)
+                shown = " ".join(f"{s} {move_text(m)}" for s, m in {**rec.get("moves", {}),
+                                                                   **rec.get("market", {})}.items())
+                if shown and keen:   # 로그에는 알릴 만한 뉴스만
+                    log(f"📈 {shown}  {r['title'][:40]}")
         except Exception as e:
             log(f"시세 기록 오류: {type(e).__name__}: {e}")
 
 
 def move_text(m: dict) -> str:
-    """"+0.4% → +1.2%" (5분 → 30분)"""
-    f = lambda v: "?" if v is None else f"{v:+.1f}%"
+    """5분 → 30분 움직임. 예: +0.4% → +1.2%, 금리는 +1bp → +3bp."""
+    u = m.get("unit", "%")
+    f = lambda v: "?" if v is None else (f"{v:+.0f}bp" if u == "bp" else f"{v:+.1f}%")
     return f"{f(m.get('m5'))} → {f(m.get('m30'))}"
 
 
@@ -668,13 +715,16 @@ def topic_records(watcher: "Watcher", topic: str) -> list:
     return sorted(recs, key=lambda r: r.get("created_at", ""))
 
 
-def plain_toast(cfg: dict, title: str, msg: str, path: str = "/"):
+def plain_toast(cfg: dict, title: str, msg: str, path: str = "/", silent: bool = False):
     try:
-        from winotify import Notification
+        from winotify import Notification, audio
     except ImportError:
         return
-    Notification(app_id="SaveTicker 뉴스", title=title, msg=msg,
-                 launch=f"http://127.0.0.1:{cfg['port']}{path}").show()
+    n = Notification(app_id="SaveTicker 뉴스", title=title, msg=msg,
+                     launch=f"http://127.0.0.1:{cfg['port']}{path}")
+    if silent:   # 말로 읽을 때는 토스트 소리를 끈다
+        n.set_audio(audio.Silent, loop=False)
+    n.show()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -721,6 +771,79 @@ def health_worker(watcher: "Watcher"):
             log(f"수집 상태 확인 오류: {type(e).__name__}: {e}")
 
 
+# ─────────────────────────────────────────────────────────────
+# 장 열기 전 브리핑
+# ─────────────────────────────────────────────────────────────
+
+def make_briefing(watcher: "Watcher") -> dict:
+    """최근 briefing_hours 시간의 중요 뉴스를 사건별로 묶어 점수 높은 순으로 고른다."""
+    cfg = watcher.cfg
+    fb = {k: fb_key(v) for k, v in latest_feedback().items()}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=cfg["briefing_hours"])
+    groups = {}
+    for r in watcher.judged.values():
+        t = parse_ts(r.get("created_at", ""))
+        if (not t or t < cutoff or r["score"] < cfg["threshold"] or fb.get(r["id"]) in ("0", "00")):
+            continue
+        groups.setdefault(r.get("topic") or r["id"], []).append(r)
+    items = []
+    for key, rs in groups.items():
+        rs.sort(key=lambda r: (r["score"], r.get("created_at", "")), reverse=True)
+        top = rs[0]
+        items.append({"topic": top.get("topic", ""), "score": top["score"], "n": len(rs),
+                      "say": top.get("say") or top.get("topic") or top["title"][:20],
+                      "title": top["title"], "url": top["url"], "reason": top.get("reason", ""),
+                      "latest": max(r.get("created_at", "") for r in rs)})
+    items.sort(key=lambda x: (x["score"], x["n"], x["latest"]), reverse=True)
+    top = items[:cfg["briefing_max"]]
+    if top:
+        text = (f"미국장 열기 전 정리입니다. 지난 {cfg['briefing_hours']}시간 주요 사건 {len(items)}건. "
+                + ", ".join(x["say"] for x in top)
+                + (f", 외 {len(items) - len(top)}건" if len(items) > len(top) else ""))
+    else:
+        text = f"미국장 열기 전 정리입니다. 지난 {cfg['briefing_hours']}시간 동안 알릴 만한 뉴스는 없었습니다."
+    now = datetime.now(KST)
+    return {"date": now.strftime("%Y-%m-%d"), "at": now.isoformat(timespec="seconds"),
+            "hours": cfg["briefing_hours"], "total": len(items), "items": items[:15], "text": text}
+
+
+def deliver_briefing(watcher: "Watcher") -> dict:
+    b = make_briefing(watcher)
+    BRIEFING.write_text(json.dumps(b, ensure_ascii=False, indent=1), encoding="utf-8")
+    log(f"📋 {b['text']}")
+    lines = "\n".join(f"{x['score']}  {x['say']}" + (f" (+{x['n'] - 1})" if x["n"] > 1 else "")
+                      for x in b["items"][:watcher.cfg["briefing_max"]])
+    plain_toast(watcher.cfg, f"장 열기 전 브리핑 · 주요 사건 {b['total']}건", lines or "알릴 만한 뉴스 없음",
+                "/briefing", silent=watcher.cfg["tts"] and not quiet_now(watcher.cfg))
+    say_alert(watcher.cfg, b["text"])
+    return b
+
+
+def read_briefing() -> dict:
+    try:
+        return json.loads(BRIEFING.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def briefing_worker(watcher: "Watcher"):
+    """평일 briefing_at 에 한 번. PC 가 그때 잠들어 있었으면 깬 뒤 2시간 안에는 한다."""
+    at = watcher.cfg.get("briefing_at") or ""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", at.strip())
+    if not m:
+        return
+    while True:
+        time.sleep(30)
+        try:
+            now = datetime.now(KST)
+            start = now.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
+            if (now.weekday() < 5 and start <= now < start + timedelta(hours=2)
+                    and read_briefing().get("date") != now.strftime("%Y-%m-%d")):
+                deliver_briefing(watcher)
+        except Exception as e:
+            log(f"브리핑 오류: {type(e).__name__}: {e}")
+
+
 def summary_toast(cfg: dict, n: int, top: list):
     try:
         from winotify import Notification, audio
@@ -741,7 +864,9 @@ class Watcher:
         self.recent_alerts = []   # (시각, 제목) — 비슷한 후속 보도를 거르려고
         self.first_seen = {}      # id → 처음 본 시각
         self.wake_at = None       # PC 가 잠들었다 깬 시각. 밀린 판별이 끝나면 요약을 알리고 비운다
-        self.moves = {m["id"]: m["moves"] for m in read_jsonl(MOVES)}   # id → {종목: {p0, m5, m30}}
+        moves = read_jsonl(MOVES)
+        self.moves = {m["id"]: m["moves"] for m in moves if "moves" in m}     # id → {종목: {p0, m5, m30}}
+        self.market = {m["id"]: m["market"] for m in moves if "market" in m}  # id → {나스닥·반도체·10년물·유가: …}
         self.summaries = {}       # (사건 이름, 건수) → 흐름 요약. 뉴스가 늘면 다시 만든다
         self.started = self.last_wake = time.time()
         self.ext = None           # 확장이 1분마다 보내는 소식: {at, watch, tick, tabs}
@@ -961,6 +1086,8 @@ def make_handler(watcher: Watcher):
                 self.send_page(page(watcher, q.get("done"), bool(q.get("all")), n))
             elif u.path == "/stats":
                 self.send_page(stats_page(watcher))
+            elif u.path == "/briefing":
+                self.send_page(briefing_page(watcher))
             elif u.path == "/topic" and q.get("name"):
                 self.send_page(topic_page(watcher, q["name"]))
             elif u.path == "/topic_summary" and q.get("name"):
@@ -987,6 +1114,10 @@ def make_handler(watcher: Watcher):
             # 다른 사이트가 몰래 보내지 못하게 사용자 정의 헤더를 요구한다 (브라우저가 막는다).
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path == "/briefing" and self.headers.get("X-Page") == "yes":
+                # 브리핑을 지금 만든다 (말하고 토스트도 띄운다)
+                self.send_json(deliver_briefing(watcher))
+                return
             if u.path == "/suggest" and self.headers.get("X-Page") == "yes":
                 try:
                     self.send_json(make_suggestion(watcher))
@@ -1065,8 +1196,8 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
         # 가장 오래된 뉴스를 섞는다. 새 뉴스는 위에 붙으니 자동 갱신 뒤에도 id 가 그대로다.
         gid = (hashlib.md5(f"{head.get('topic', '')}|{kids[-1]['id']}".encode()).hexdigest()[:10]
                if kids else "")
-        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves))
-        rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves) for k in kids)
+        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves, market=watcher.market))
+        rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves, market=watcher.market) for k in kids)
     if left > 0:
         rows.append(f"<tr><td colspan=4 class=more><a class=more href='/?n={n + PAGE_LINES}{qs}'>"
                     f"더 보기 (뉴스 {min(left, PAGE_LINES)}개 더 · 남은 {left}개)</a></td></tr>")
@@ -1094,6 +1225,25 @@ def _recent_alerts(watcher: Watcher) -> str:
     return "<span class=why>최근 알림</span> " + " <span class=why>·</span> ".join(items)
 
 
+def market_html(market: dict) -> str:
+    """시장 반응 칩: 30분 뒤만 짧게. 나스닥·반도체 ±0.5%, 10년물 ±3bp, 유가 ±1% 넘으면 색을 입힌다."""
+    if not market:
+        return ""
+    big = {"나스닥": 0.5, "반도체": 0.5, "10년물": 3, "유가": 1}
+    parts, hot = [], 0
+    for name, m in market.items():
+        v = m.get("m30")
+        if v is None:
+            continue
+        unit = "bp" if m.get("unit") == "bp" else "%"
+        parts.append(f"{name} {v:+.0f}{unit}" if unit == "bp" else f"{name} {v:+.1f}{unit}")
+        hot = max(hot, abs(v) / big.get(name, 1))
+    if not parts:
+        return ""
+    cls = "mv mk hot" if hot >= 1 else "mv mk"
+    return f"<span class='{cls}' title='뉴스 뒤 30분 시장 움직임 (QQQ·SOXX·미 10년물·USO)'>시장 {' · '.join(parts)}</span>"
+
+
 def moves_html(moves: dict) -> str:
     """종목별 5분 → 30분 움직임 칩. 30분 뒤가 ±1% 넘으면 색을 입힌다."""
     out = []
@@ -1106,7 +1256,7 @@ def moves_html(moves: dict) -> str:
 
 
 def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "",
-             moves: dict = None) -> str:
+             moves: dict = None, market: dict = None) -> str:
     t = parse_ts(r.get("created_at", ""))
     when = t.astimezone(KST).strftime("%m-%d %H:%M") if t else ""
     state = fb.get(r["id"])   # "10" / "1" / "0" / "00" / None
@@ -1126,7 +1276,7 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
     # 사건 이름을 누르면 그 사건의 타임라인
     topic = (f"<a class=tp href='/topic?name={quote(r['topic'])}' target=_blank title='사건 타임라인'>"
              f"{html.escape(r['topic'])}</a>" if r.get("topic") else "")
-    mv = moves_html((moves or {}).get(r["id"]) or {})
+    mv = moves_html((moves or {}).get(r["id"]) or {}) + market_html((market or {}).get(r["id"]) or {})
     source = SOURCE_NAMES.get(r.get("source", ""), r.get("source", ""))
     src = f"<span class=src>{html.escape(source)}</span>" if source else ""
     # 누른 버튼은 불이 켜지고, 다시 누르면 취소된다.
@@ -1153,10 +1303,10 @@ body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16p
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
 .b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
-.stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
+.stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} .mv.mk{{background:#1f2633;color:#9fb3d1}} .mv.mk.hot{{background:#3a3320;color:#f0c674}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
 </style>
-<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
+<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/briefing' target=_blank>장 전 브리핑</a><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
 <div id=recent>{recent}</div>
 {note}<p class=why id=upd></p><table id=list>{''.join(rows)}</table>
@@ -1255,6 +1405,7 @@ button{background:#2a3d5c;color:#e6e6e6;border:1px solid #6d8fd6;border-radius:6
 button:disabled{opacity:.5;cursor:wait} .add{color:#8fd18f} .rm{color:#f0a36c}
 .mv{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}
 .mv.up{background:#1f3a26;color:#8fd18f} .mv.dn{background:#3d2323;color:#f08c8c}
+.mv.mk{background:#1f2633;color:#9fb3d1} .mv.mk.hot{background:#3a3320;color:#f0c674}
 </style>"""
 
 
@@ -1269,6 +1420,10 @@ def stats_page(watcher: Watcher) -> str:
     recs = list(watcher.judged.values())
     good = lambda r: fb.get(r["id"]) in ("1", "10")
     bad = lambda r: fb.get(r["id"]) in ("0", "00")
+
+    def mkt(r, name):   # 30분 뒤 시장 움직임의 절댓값
+        m = (watcher.market.get(r["id"]) or {}).get(name) or {}
+        return abs(m["m30"]) if m.get("m30") is not None else None
 
     def big(r):   # 30분 뒤 가장 크게 움직인 종목의 |%|
         ms = [abs(m["m30"]) for m in (watcher.moves.get(r["id"]) or {}).values() if m.get("m30") is not None]
@@ -1288,7 +1443,11 @@ def stats_page(watcher: Watcher) -> str:
         t1.append(f"<tr><td>{name}점</td><td class=n>{len(rs)}</td><td class=n>{sum(1 for r in rs if r.get('alerted'))}</td>"
                   f"<td class=n>{len(rated)}</td><td class=n>{g}</td><td class=n>{len(rated) - g}</td>"
                   f"<td class=n>{_pct(g, len(rated))}</td>"
-                  f"<td class=n>{f'{sum(mv) / len(mv):.1f}% ({len(mv)}건)' if mv else '-'}</td></tr>")
+                  f"<td class=n>{f'{sum(mv) / len(mv):.1f}% ({len(mv)}건)' if mv else '-'}</td>"
+                  + "".join(f"<td class=n>{f'{sum(xs) / len(xs):.{d}f}{u} ({len(xs)}건)' if xs else '-'}</td>"
+                            for xs, u, d in (([x for x in (mkt(r, '나스닥') for r in rs) if x is not None], "%", 2),
+                                             ([x for x in (mkt(r, '10년물') for r in rs) if x is not None], "bp", 1)))
+                  + "</tr>")
 
     t2 = []
     for t in range(5, 10):
@@ -1321,9 +1480,9 @@ def stats_page(watcher: Watcher) -> str:
     every = watcher.cfg["suggest_days"]
     return f"""<!doctype html><meta charset=utf-8><title>점수 성적표</title>{SUB_CSS}
 <h2>점수 성적표 <small class=why>판별 {len(recs)}건 · 반응 {sum(1 for r in recs if fb.get(r['id']))}건 · 약 {span:.1f}일치 · 기준 {th}점</small></h2>
-<p class=why>👍·🔔10 은 "좋음", 👎·🔕0 은 "싫음"으로 셉니다. 시세는 종목이 붙은 뉴스의 30분 뒤 움직임(가장 크게 움직인 종목, 절댓값) 평균입니다.</p>
+<p class=why>👍·🔔10 은 "좋음", 👎·🔕0 은 "싫음"으로 셉니다. 움직임은 모두 뉴스 뒤 30분의 절댓값 평균입니다. 종목은 뉴스에 붙은 종목 가운데 가장 크게 움직인 것, 나스닥은 QQQ, 10년물은 미 국채 수익률(bp). 점수가 높을수록 시장이 더 움직였다면 판별이 맞게 가는 것입니다.</p>
 <h3>점수대별</h3>
-<table><tr><th>점수</th><th>판별</th><th>알림</th><th>반응</th><th>좋음</th><th>싫음</th><th>좋음 비율</th><th>30분 뒤 움직임</th></tr>{''.join(t1)}</table>
+<table><tr><th>점수</th><th>판별</th><th>알림</th><th>반응</th><th>좋음</th><th>싫음</th><th>좋음 비율</th><th>종목 30분 뒤</th><th>나스닥 30분 뒤</th><th>10년물 30분 뒤</th></tr>{''.join(t1)}</table>
 <h3>기준 점수를 바꾸면</h3>
 <p class=why>하루 알림 수는 늦게 잡힌 뉴스를 빼고, 같은 사건 거르기 전의 수라 실제보다 많습니다.</p>
 <table><tr><th>기준</th><th>하루 알림</th><th>그중 싫음</th><th>놓치는 좋음</th></tr>{''.join(t2)}</table>
@@ -1347,6 +1506,38 @@ document.getElementById("go").onclick = async (e) => {{
 </script>"""
 
 
+def briefing_page(watcher: Watcher) -> str:
+    """마지막 장 열기 전 브리핑. 사건마다 타임라인으로 잇는다."""
+    b = read_briefing()
+    at = watcher.cfg.get("briefing_at") or "(끔)"
+    if b:
+        rows = []
+        for x in b["items"]:
+            name = x["topic"] or x["say"]
+            link = (f"<a href='/topic?name={quote(x['topic'])}' target=_blank>타임라인</a>" if x["topic"] else "")
+            more = f" <span class=why>+{x['n'] - 1}건</span>" if x["n"] > 1 else ""
+            rows.append(f"<tr><td class=n>{x['score']}</td><td><b>{html.escape(name)}</b>"
+                        f"{more}"
+                        f"<div><a href='{html.escape(x['url'])}' target=_blank>{html.escape(x['title'])}</a></div>"
+                        f"<div class=why>{html.escape(x['reason'])}</div></td><td class=why>{link}</td></tr>")
+        body = (f"<p class=why>{b['at'][:16].replace('T', ' ')} · 지난 {b['hours']}시간 · 주요 사건 {b['total']}건</p>"
+                f"<div class=box>{html.escape(b['text'])}</div>"
+                f"<table>{''.join(rows) or '<tr><td class=why>알릴 만한 뉴스 없음</td></tr>'}</table>")
+    else:
+        body = "<p class=why>아직 만든 브리핑이 없습니다.</p>"
+    return f"""<!doctype html><meta charset=utf-8><title>장 열기 전 브리핑</title>{SUB_CSS}
+<h2>장 열기 전 브리핑 <small class=why>평일 {html.escape(at)} (한국 시각) · 기준 {watcher.cfg['threshold']}점 이상 · 사건별로 묶음</small></h2>
+{body}
+<p><button id=go>지금 브리핑 만들기</button> <span class=why>말로 읽고 토스트도 띄웁니다</span></p>
+<script>
+document.getElementById("go").onclick = async (e) => {{
+  e.target.disabled = true;
+  await fetch("/briefing", {{method: "POST", headers: {{"X-Page": "yes"}}}});
+  location.reload();
+}};
+</script>"""
+
+
 def topic_page(watcher: Watcher, name: str) -> str:
     """한 사건의 뉴스를 시간순으로. 흐름 요약은 버튼을 눌러야 LLM 에게 묻는다."""
     recs = topic_records(watcher, name)
@@ -1357,7 +1548,8 @@ def topic_page(watcher: Watcher, name: str) -> str:
         rows.append(f"<tr><td class=why>{t.astimezone(KST):%m-%d %H:%M}</td><td class=n>{mark}{r['score']}</td>"
                     f"<td><a href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
                     f"<div class=why>{html.escape(r.get('reason', ''))}"
-                    f"{moves_html(watcher.moves.get(r['id']) or {})}</div></td></tr>")
+                    f"{moves_html(watcher.moves.get(r['id']) or {})}"
+                    f"{market_html(watcher.market.get(r['id']) or {})}</div></td></tr>")
     known = watcher.summaries.get((name, len(recs)), "")
     return f"""<!doctype html><meta charset=utf-8><title>{html.escape(name)}</title>{SUB_CSS}
 <h2>{html.escape(name)} <small class=why>최근 3일 {len(recs)}건 · 오래된 것부터</small></h2>
@@ -1434,6 +1626,7 @@ def main():
         threading.Thread(target=moves_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=suggest_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=health_worker, args=(watcher,), daemon=True).start()
+    threading.Thread(target=briefing_worker, args=(watcher,), daemon=True).start()
     log(f"판별 목록: http://127.0.0.1:{cfg['port']}/")
     try:
         watcher.run()

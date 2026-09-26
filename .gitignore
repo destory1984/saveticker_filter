@@ -12,3 +12,4 @@ CLAUDE.md
 *.bak.jsonl
 # 작업 노트 — 이 PC 에만 둔다
 NOTES.md
+briefing.json

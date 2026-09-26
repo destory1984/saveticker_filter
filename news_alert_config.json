@@ -24,5 +24,8 @@
  "wake_gap_min": 10,
  "summary_max": 5,
  "moves": true,
- "suggest_days": 7
+ "suggest_days": 7,
+ "briefing_at": "22:00",
+ "briefing_hours": 12,
+ "briefing_max": 5
 }
