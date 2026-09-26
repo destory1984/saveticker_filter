@@ -78,6 +78,7 @@ DEFAULTS = {
     "summary_max": 5,              # 요약에서 읽어 줄 뉴스 수
     "moves": True,                 # 기준 점수 이상 뉴스의 종목 시세가 5분·30분 뒤 얼마나 움직였는지 적는다 (yfinance, 공개 시세)
     "suggest_days": 7,             # 관심사 고침 제안을 이 날짜마다 한 번 만든다. 0 이면 버튼으로만
+    "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
 }
 
 PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
@@ -524,21 +525,32 @@ def move_text(m: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 
 SUGGEST_PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
-아래 [관심사]는 뉴스 점수를 매길 때 기준으로 쓰는 문서이고, [반응]은 최근 {days}일 동안 이 사람이 뉴스에 보인 반응이다.
-반응을 보고 [관심사]에 더하면 좋을 줄과, 빼거나 고치면 좋을 줄을 제안하라.
-- 👍·🔔 인데 점수가 낮았던 뉴스는 관심사에 빠진 것이 있다는 뜻일 수 있다
-- 👎·🔕 인데 점수가 높았던 뉴스는 관심사가 너무 넓거나 틀렸다는 뜻일 수 있다
-- 한두 건뿐이라 근거가 약하면 제안하지 마라. 제안할 것이 없으면 빈 목록으로 둬라
-- 계좌·보유 수량 같은 것은 묻지도 넣지도 마라
+[관심사]는 뉴스에 0~10점을 매길 때 기준으로 쓰는 문서다. {threshold}점 이상이면 알림을 보낸다.
+최근 {days}일 동안 이 사람이 뉴스에 보인 반응을 아래 세 묶음으로 나눠 두었다.
+이것을 보고 [관심사]에 더하면 좋을 줄과, 좁히거나 고치면 좋을 줄을 제안하라.
+
+규칙:
+- [놓친 뉴스]는 이 사람이 좋아했는데 점수가 낮았던 것이다. 여기서 되풀이되는 주제가 관심사에 빠져 있으면 "add" 에 넣어라.
+- [헛알림]은 이 사람이 싫어했는데 점수가 높아 알림이 간 것이다. 여기서 되풀이되는 주제를 좁히는 고침을 "remove" 에 넣어라.
+- [잘 맞은 뉴스]는 이 사람이 좋아했고 점수도 높았던 것이다. 이 주제들은 지금 관심사가 잘 잡고 있다. 절대 빼거나 좁히지 마라.
+- 한 주제가 [헛알림]과 [잘 맞은 뉴스]에 모두 있으면, 주제 전체를 빼지 말고 싫어한 쪽만 가려내는 조건을 제안하라.
+- 같은 주제가 세 건 이상 되풀이될 때만 제안하라. 근거가 약하면 빈 목록으로 둬라.
+- 계좌·보유 수량 같은 것은 묻지도 넣지도 마라.
 
 [관심사]
 {interests}
 
-[반응] (점수 반응 제목)
-{rows}
+[놓친 뉴스] 좋아함 · 점수 {threshold}점 미만 · {n_missed}건 (점수 제목)
+{missed}
+
+[헛알림] 싫어함 · 점수 {threshold}점 이상 · {n_false}건 (점수 제목)
+{false}
+
+[잘 맞은 뉴스] 좋아함 · 점수 {threshold}점 이상 · {n_hit}건 (점수 제목)
+{hit}
 
 JSON 만 출력하라.
-{{"add": ["관심사에 더할 줄", ...], "remove": ["빼거나 고칠 줄 (관심사 원문 그대로) → 어떻게", ...], "why": "한두 문장"}}
+{{"add": ["관심사에 더할 줄", ...], "remove": ["관심사 원문 그대로 → 어떻게 좁히거나 고칠지", ...], "why": "근거가 된 반응을 들어 한두 문장"}}
 """
 
 TOPIC_PROMPT = """아래는 "{topic}" 사건에 관한 뉴스 제목을 오래된 것부터 늘어놓은 것이다.
@@ -551,28 +563,46 @@ JSON 만 출력하라. {{"summary": "요약"}}
 
 
 def make_suggestion(watcher: "Watcher") -> dict:
-    """최근 반응으로 관심사 고침 제안을 만들어 SUGGEST 에 적는다. 반응이 적으면 만들지 않는다."""
-    days = watcher.cfg["suggest_days"] or 7
+    """최근 반응으로 관심사 고침 제안을 만들어 SUGGEST 에 적는다. 반응이 적으면 만들지 않는다.
+
+    반응을 한 줄로 섞어 주면 👎 가 훨씬 많아 모델이 좋아한 주제까지 빼라고 한다 (09-26, 이란 뉴스
+    👍12·👎6 인데 "이란 정세를 빼라"). 그래서 고칠 근거가 되는 두 묶음(놓친 뉴스·헛알림)과
+    건드리지 말아야 할 묶음(잘 맞은 뉴스)으로 나눠 준다. 좋아했고 점수도 낮은 뉴스는 그대로 두면 된다.
+    """
+    cfg = watcher.cfg
+    days, th = cfg["suggest_days"] or 7, cfg["threshold"]
     cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds")
-    marks = {"10": "🔔", "1": "👍", "0": "👎", "00": "🔕"}
-    rows = []
+    missed, false, hit = [], [], []
     for rec in sorted(latest_feedback().values(), key=lambda x: x.get("at", ""), reverse=True):
         k, j = fb_key(rec), watcher.judged.get(rec["id"])
-        if k and j and rec.get("at", "") >= cutoff:
-            rows.append(f"{j['score']:>2} {marks[k]} {j['title']}")
-    if len(rows) < 5:
-        raise RuntimeError(f"최근 {days}일 반응이 {len(rows)}건뿐이라 제안하지 않는다 (5건 이상 필요)")
+        if not k or not j or rec.get("at", "") < cutoff:
+            continue
+        line = f"{j['score']:>2} {j['title']}"
+        liked = k in ("1", "10")
+        if liked and j["score"] < th:
+            missed.append(line)
+        elif liked:
+            hit.append(line)
+        elif j["score"] >= th:
+            false.append(line)
+    if len(missed) + len(false) < 3:
+        raise RuntimeError(f"최근 {days}일 놓친 뉴스 {len(missed)}건·헛알림 {len(false)}건뿐이라 제안하지 않는다")
     prompt = SUGGEST_PROMPT.format(
-        days=days, interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
-        rows="\n".join(rows[:80]))
+        days=days, threshold=th,
+        interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
+        n_missed=len(missed), missed="\n".join(missed[:40]) or "(없음)",
+        n_false=len(false), false="\n".join(false[:40]) or "(없음)",
+        n_hit=len(hit), hit="\n".join(hit[:40]) or "(없음)")
 
     def check(text):
         d = parse_json(text)
         if not isinstance(d.get("add"), list) or not isinstance(d.get("remove"), list):
             raise RuntimeError("add/remove 가 없다")
         return d
-    d, by = ask_llm(watcher.cfg, prompt, check)
-    out = {"at": datetime.now(KST).isoformat(timespec="seconds"), "days": days, "n": len(rows), "by": by,
+    # 한 주에 한 번이고 판단이 까다로워 Claude 에게 먼저 묻는다 (suggest_backend)
+    d, by = ask_llm({**cfg, "backend": cfg["suggest_backend"]}, prompt, check)
+    out = {"at": datetime.now(KST).isoformat(timespec="seconds"), "days": days, "by": by,
+           "n": len(missed) + len(false) + len(hit), "missed": len(missed), "false": len(false), "hit": len(hit),
            "add": [str(x) for x in d["add"]], "remove": [str(x) for x in d["remove"]],
            "why": str(d.get("why", ""))}
     SUGGEST.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1180,7 +1210,9 @@ def stats_page(watcher: Watcher) -> str:
 
     s = read_suggestion()
     if s:
-        sug = (f"<p class=why>{s['at'][:16].replace('T', ' ')} · 최근 {s['days']}일 반응 {s['n']}건 · {s['by']}</p>"
+        counts = (f"놓친 뉴스 {s['missed']} · 헛알림 {s['false']} · 잘 맞은 뉴스 {s['hit']}" if "missed" in s
+                  else f"반응 {s['n']}건")
+        sug = (f"<p class=why>{s['at'][:16].replace('T', ' ')} · 최근 {s['days']}일 {counts} · {s['by']}</p>"
                + "".join(f"<div class=add>+ {html.escape(x)}</div>" for x in s["add"])
                + "".join(f"<div class=rm>− {html.escape(x)}</div>" for x in s["remove"])
                + (f"<p>{html.escape(s['why'])}</p>" if s.get("why") else "")
