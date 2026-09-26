@@ -79,7 +79,7 @@ DEFAULTS = {
     "summary_max": 5,              # 요약에서 읽어 줄 뉴스 수
     "moves": True,                 # 뉴스 뒤 5분·30분 시세 움직임을 적는다 (yfinance, 공개 시세). 시장은 모든 뉴스, 종목은 기준 점수 이상만
     "suggest_days": 7,             # 관심사 고침 제안을 이 날짜마다 한 번 만든다. 0 이면 버튼으로만
-    "briefing_at": "22:00",        # 평일 이 시각(한국)에 장 열기 전 브리핑. 비우면 안 한다. 미국 서머타임이 끝나면 "23:00" 권함
+    "briefing_at": "21:00",        # 평일 이 시각(한국)에 장 열기 전 브리핑. 비우면 안 한다
     "briefing_hours": 12,          # 브리핑에 담을 기간
     "briefing_max": 5,             # 브리핑에서 읽어 줄 사건 수
     "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
