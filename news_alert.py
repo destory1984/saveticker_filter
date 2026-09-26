@@ -101,10 +101,14 @@ PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
 
 같은 사건 묶기:
 - 뉴스마다 그 뉴스가 다루는 사건의 이름(topic)을 10자 안팎 한국어로 붙여라. 예: "미중 정상회담", "H&M 3분기 실적", "미 5년물 국채 입찰".
+- 이름은 "누가 무엇을" 이 드러나게 짓는다. 나라·인물 이름만으로 짓지 마라. 예: "이란" (X), "트럼프 이란 제안 거부" (O).
 - 한 사건에서 나온 여러 발언, 후속 보도([2보] 등), 다른 매체의 같은 보도는 모두 같은 이름을 쓴다.
-- [최근 사건 이름]에 같은 사건이 있으면 그 이름을 글자 그대로 다시 써라.
+- [최근 사건]에 같은 사건이 있으면 그 이름을 글자 그대로 다시 써라. 이름 뒤에 그 사건의 기사 제목을 붙여 두었다.
+- 같은 사건이란 그 기사 제목과 같은 일을 다루는 것이다. 같은 나라·인물이 나와도 다른 일이면 새 이름을 지어라.
+  예: 최근 사건이 "이란 항공편 금지 — 이란 항공사 운항 금지 …" 일 때, "트럼프, 이란의 제안 거부" 는 다른 일이다.
+- 이름만 쓰고, 이름 뒤의 " — 기사 제목" 은 topic 에 넣지 마라.
 
-[최근 사건 이름]
+[최근 사건] (이름 — 그 사건의 최근 기사 제목)
 {topics}
 
 [새 뉴스]
@@ -284,7 +288,7 @@ def parse_results(text: str, batch: list) -> dict:
             continue
         if 1 <= i <= len(batch):
             out[batch[i - 1]["id"]] = (max(0, min(10, score)), str(it.get("reason", "")).strip(),
-                                       str(it.get("topic", "")).strip(), str(it.get("say", "")).strip())
+                                       str(it.get("topic", "")).split(" — ")[0].strip(), str(it.get("say", "")).strip())
     return out
 
 
@@ -709,13 +713,16 @@ class Watcher:
         return sorted(recs, key=lambda r: r.get("at", ""), reverse=True)
 
     def recent_topics(self) -> list:
-        """프롬프트에 넣을 최근 사건 이름. 같은 사건에 같은 이름을 다시 쓰게 한다."""
-        seen = []
+        """프롬프트에 넣을 최근 사건. 같은 사건에 같은 이름을 다시 쓰게 한다.
+        이름만 주면 나라 이름만 겹쳐도 옛 이름을 가져다 붙인다 (09-26 "트럼프 이란 제안 거부" 가
+        "이란 항공편 금지" 로 묶임). 그래서 그 사건의 최근 기사 제목을 함께 준다."""
+        seen, out = set(), []
         for r in self.recent(3):
             t = r.get("topic")
             if t and t not in seen:
-                seen.append(t)
-        return seen[:40]
+                seen.add(t)
+                out.append(f"{t} — {r['title'][:60]}")
+        return out[:40]
 
     def topic_alerted(self, topic: str) -> bool:
         """한 시간 안에 이 사건으로 알림을 보냈는가."""
@@ -1307,18 +1314,19 @@ def main():
         rows = rows[-args.test:]
         if not rows:
             sys.exit(f"{DATA} 에 오늘·어제 CSV 가 없다.")
-        topics = []
+        topics = {}   # 사건 이름 → 최근 기사 제목 (감시 때와 같은 모양으로 넘긴다)
         for k in range(0, len(rows), cfg["batch"]):
             batch = rows[k:k + cfg["batch"]]
             t0 = time.time()
-            res, by = judge(cfg, batch, topics)
+            res, by = judge(cfg, batch, [f"{t} — {title[:60]}" for t, title in reversed(topics.items())])
             log(f"{len(batch)}건 판별 {time.time() - t0:.1f}초 ({by})")
             for r in batch:
                 score, reason, topic, say = res.get(r["id"], (None, "(응답 없음)", "", ""))
                 mark = "🔔" if score is not None and score >= cfg["threshold"] else "  "
                 print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — {reason}  🗣 {say}")
-                if topic and topic not in topics:
-                    topics.insert(0, topic)
+                if topic:
+                    topics.pop(topic, None)
+                    topics[topic] = r["title"]
         return
 
     watcher = Watcher(cfg)
