@@ -1017,7 +1017,7 @@ SOURCE_NAMES = {"reuters": "Reuters", "로이터": "Reuters", "financial-juice":
 FB_LABELS = {"10": "🔔10점", "1": "👍", "0": "👎", "00": "🔕0점"}
 
 
-PAGE_LINES = 50   # 판별 목록 한 번에 보이는 줄 수. 같은 사건 묶음은 한 줄로 센다. "더 보기" 로 이만큼씩 늘린다
+PAGE_LINES = 50   # 판별 목록에 한 번에 싣는 뉴스 수 (묶음 안의 뉴스도 센다). "더 보기" 로 이만큼씩 늘린다
 
 
 def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES) -> str:
@@ -1035,7 +1035,9 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
     hidden = 0 if show_all else sum(1 for r in recs if hide(r))
     if not show_all:
         recs = [r for r in recs if not hide(r)]
-    recs = recs[:1000]
+    # 뉴스가 쌓이면 화면이 끝없이 길어진다. 최근 n 건만 그리고 맨 아래 "더 보기" 를 둔다.
+    left = len(recs) - n
+    recs = recs[:n]
     qs = "&all=1" if show_all else ""
     # 같은 사건(topic)은 가장 최근 뉴스 한 줄로 접는다. 6시간 넘게 떨어지면 다른 묶음으로 본다.
     heads, members, order = {}, {}, []
@@ -1049,9 +1051,6 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
                 heads[tp] = r
             members[r["id"]] = []
             order.append(r)
-    # 뉴스가 쌓이면 화면이 끝없이 길어진다. 최근 n 줄만 그리고 맨 아래 "더 보기" 를 둔다.
-    left = len(order) - n
-    order = order[:n]
     rows = []
     for head in order:
         kids = members[head["id"]]
@@ -1063,7 +1062,7 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
         rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves) for k in kids)
     if left > 0:
         rows.append(f"<tr><td colspan=4 class=more><a class=more href='/?n={n + PAGE_LINES}{qs}'>"
-                    f"더 보기 ({min(left, PAGE_LINES)}줄 더 · 남은 {left}줄)</a></td></tr>")
+                    f"더 보기 (뉴스 {min(left, PAGE_LINES)}개 더 · 남은 {left}개)</a></td></tr>")
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
     return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v),
                      recent_alerts_html(watcher))
