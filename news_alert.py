@@ -54,7 +54,8 @@ DEFAULTS = {
     "timeout_sec": 180,
     "ollama_timeout_sec": 90,      # auto 에서 ollama 를 이만큼 기다려 보고 안 되면 claude 로
     "threshold": 7,                # 이 점수 이상이면 알린다
-    "max_age_min": 60,             # 이보다 오래된 뉴스는 판별하지 않는다
+    "max_age_min": 60,             # 이보다 오래된 뉴스는 알리지 않는다 (판별은 한다)
+    "catchup_hours": 12,           # 절전·재시작으로 밀린 뉴스는 이만큼까지 거슬러 판별해 목록에만 올린다
     "batch": 10,                   # 한 번에 묻는 뉴스 수
     "poll_sec": 10,
     "max_wait_sec": 90,            # 뉴스를 모아서 한 번에 묻는다. batch 가 차거나 가장 오래 기다린 뉴스가 이만큼 되면 묻는다
@@ -347,7 +348,8 @@ class Watcher:
         return bool(topic) and any(r.get("alerted") and r.get("topic") == topic for r in self.recent(1))
 
     def pending(self) -> list:
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=self.cfg["max_age_min"])
+        """아직 판별하지 않은 뉴스. 알릴 만큼 새것을 먼저, 밀린 것은 그 뒤에."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.cfg["catchup_hours"])
         seen, out = set(), []
         for r in read_news():
             done = self.judged.get(r["id"])
@@ -358,7 +360,11 @@ class Watcher:
                 continue
             seen.add(r["id"])
             out.append(r)
-        return sorted(out, key=lambda r: r["ts"])
+        return sorted(out, key=lambda r: (self.is_late(r), r["ts"]))
+
+    def is_late(self, r: dict) -> bool:
+        """알리기엔 늦은 뉴스인가. PC 가 잠든 사이 나온 뉴스를 깨어나서 한꺼번에 울리지 않게."""
+        return r["ts"] < datetime.now(timezone.utc) - timedelta(minutes=self.cfg["max_age_min"])
 
     def step(self):
         todo = self.pending()
@@ -370,6 +376,9 @@ class Watcher:
             return
         for k in range(0, len(todo), self.cfg["batch"]):
             batch = todo[k:k + self.cfg["batch"]]
+            # 밀린 뉴스는 한 차례에 한 묶음만. 그사이 새로 들어온 뉴스가 뒤로 밀리지 않게.
+            if k and self.is_late(batch[0]):
+                return
             t0 = time.time()
             try:
                 result, by = judge(self.cfg, batch, self.recent_topics())
@@ -382,14 +391,16 @@ class Watcher:
                     continue
                 score, reason, topic = result[r["id"]]
                 # 같은 사건(시진핑 발언 문장마다 뜨는 속보 등)은 한 시간에 한 번만 알린다
-                alert = (score >= self.cfg["threshold"] and not self.topic_alerted(topic)
+                late = self.is_late(r)
+                alert = (score >= self.cfg["threshold"] and not late and not self.topic_alerted(topic)
                          and not self.is_dup(r["title"]))
                 rec = {"id": r["id"], "title": r["title"], "url": r["url"], "source": r.get("source", ""),
                        "created_at": r["created_at"], "score": score, "reason": reason, "topic": topic,
-                       "alerted": alert, "by": by, "at": datetime.now(KST).isoformat(timespec="seconds")}
+                       "alerted": alert, "late": late, "by": by,
+                       "at": datetime.now(KST).isoformat(timespec="seconds")}
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
-                mark = "🔔" if alert else "  "
+                mark = "🔔" if alert else "⏰" if late and score >= self.cfg["threshold"] else "  "
                 log(f"{mark} {score:>2} [{topic}] {r['title'][:70]}  — {reason}")
                 if alert:
                     self.recent_alerts.append((time.time(), r["title"]))

@@ -85,14 +85,30 @@ async function collectPages(pages, delayMs) {
 }
 
 let watchTimer = null;
+let ticking = false;
+const CATCHUP_PAGES = 30;   // 한 페이지 20건. PC 가 하룻밤 잠들어도 메울 만큼
 async function watchTick() {
+  if (ticking) return;
+  ticking = true;
   try {
-    // 2페이지까지 본다: 번역이 늦은 뉴스가 1페이지 밖으로 밀려나도 한글 제목을 받도록.
-    const added = await store([...(await fetchPage(1)), ...(await fetchPage(2))]);
+    // 2페이지까지는 늘 본다: 번역이 늦은 뉴스가 1페이지 밖으로 밀려나도 한글 제목을 받도록.
+    // 그 뒤로는 한 페이지가 통째로 처음 보는 뉴스일 때만 더 거슬러 간다.
+    // PC 가 잠들었거나 탭이 재워졌던 사이의 뉴스를 깨어나서 메운다.
+    let added = 0;
+    for (let p = 1; p <= CATCHUP_PAGES; p++) {
+      if (p > 2) await sleep(500);
+      const items = await fetchPage(p);
+      const n = await store(items);
+      added += n;
+      const valid = items.filter((it) => it?.id && !it.is_deleted).length;
+      if (!items.length || (p >= 2 && n < valid)) break;
+    }
     await setStatus(`감시 중 · 마지막 확인 ${new Date().toLocaleTimeString()} (+${added})`);
     await chrome.storage.local.set({ lastTick: Date.now() });   // background.js 감시견이 본다
   } catch (err) {
     await setStatus(`감시 오류: ${err.message}`);
+  } finally {
+    ticking = false;
   }
 }
 function setWatch(on, sec) {

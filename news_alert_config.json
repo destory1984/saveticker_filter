@@ -7,6 +7,7 @@
  "timeout_sec": 180,
  "threshold": 7,
  "max_age_min": 60,
+ "catchup_hours": 12,
  "batch": 10,
  "poll_sec": 10,
  "port": 18765,
