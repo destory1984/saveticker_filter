@@ -20,7 +20,7 @@
 Edge 확장 (extension/)          news_alert.py
   saveticker 뉴스 탭에서         data/*.csv 를 지켜보다가
   새 뉴스 수집 ──────────▶  날짜별 CSV  ──▶  LLM 판별 (ollama → 안 되면 claude CLI)
-                              data/             7점 이상이면 윈도우 토스트
+                              data/             7점 이상이면 윈도우 토스트 + 음성
                                                 http://127.0.0.1:18765  판별 목록 · 🔔10 👍 👎 🔕0 반응
 ```
 
@@ -36,7 +36,7 @@ Edge 확장 (extension/)          news_alert.py
 
 | 파일 | 역할 |
 |---|---|
-| `extension/` | Edge/Chrome 확장. 페이지가 받는 `/api/news/list` 응답을 기록하고, 실시간 감시로 1·2페이지를 주기적으로 확인한다. 날짜별 CSV 를 `다운로드\saveticker\` 에 저장한다 |
+| `extension/` | Edge/Chrome 확장. 페이지가 받는 `/api/news/list` 응답을 기록하고, 실시간 감시로 1·2페이지를 주기적으로 확인한다. PC 가 잠들었다 깨는 등으로 빈 시간이 생기면 최대 30페이지까지 거슬러 받는다. 날짜별 CSV 를 `다운로드\saveticker\` 에 저장한다 |
 | `news_alert.py` | CSV 의 새 뉴스를 판별해 알림을 띄우고, 판별 목록 페이지를 연다 |
 | `interests.md` | 판별 기준이 되는 관심사. 고치면 다음 판별부터 반영된다 |
 | `news_alert_config.json` | 모델, 기준 점수, 포트 등 설정 |
@@ -49,7 +49,7 @@ Edge 확장 (extension/)          news_alert.py
    ```
    mklink /J "%USERPROFILE%\Downloads\saveticker" "C:\_c\saveticker\data"
    ```
-3. `pip install requests winotify`, 그리고 터미널에서 `claude` 실행 후 `/login` 한 번.
+3. `pip install requests winotify edge-tts pywin32`, 그리고 터미널에서 `claude` 실행 후 `/login` 한 번.
    ollama 가 켜져 있으면 그쪽을 먼저 쓴다 (`news_alert_config.json` 의 `model`).
 4. `news_alert_bg.vbs` 실행. 로그는 `news_alert.log`.
 5. saveticker 뉴스 탭을 열고 확장 팝업에서 **실시간 감시** 를 켠다.
@@ -61,6 +61,11 @@ Edge 확장 (extension/)          news_alert.py
 - 뉴스마다 **사건 이름**(예: "트럼프 시진핑 회담")도 붙인다. 발언 한 문장마다 뜨는 속보, [2보]·[3보],
   다른 매체의 같은 보도가 한 이름으로 묶인다. 최근 3시간의 사건 이름을 프롬프트에 넣어 같은 이름을 다시 쓰게 한다.
 - 알림은 **같은 사건이면 한 시간에 한 번** 만 보낸다.
+- 알림은 말로도 읽는다. 말머리 소리 뒤에 LLM 이 제목을 줄인 말("이란 휴전안 거부")을 Edge 음성으로 읽고,
+  안 되면 윈도우 기본 음성으로 읽는다. `tts: false` 로 끄고, `tts_quiet: "23-07"` 처럼 말하지 않을 시간을 둔다.
+  `python news_alert.py --say "이란 휴전안 거부"` 로 들어 볼 수 있다.
+- 나온 지 60분(`max_age_min`)이 넘은 뉴스는 판별해 목록에만 올리고 알리지 않는다. PC 가 잠든 사이 쌓인 뉴스는
+  12시간(`catchup_hours`)까지 거슬러 판별한다.
 - claude CLI 는 도구·MCP·설정을 모두 빼고 부른다 (10건에 입력 약 3천 토큰).
 - `python news_alert.py --test 15` 로 최근 15건을 판별만 해 볼 수 있다.
   `--before "2026-09-24 23:50"` 을 붙이면 그 시각까지의 뉴스로 되짚어 본다.

@@ -11,9 +11,10 @@
 실행:
   python news_alert.py            # 감시 시작
   python news_alert.py --test 15  # 최근 15건만 판별해 점수를 출력 (알림 없음)
+  python news_alert.py --say "이란 휴전안 거부"   # 음성 알림 시험
 
 필요:
-  pip install requests winotify
+  pip install requests winotify edge-tts pywin32
   claude CLI 로그인 (터미널에서 claude 실행 후 /login 한 번)
   news_alert_config.json 의 backend: "auto" 는 ollama 가 켜져 있으면 먼저 쓰고,
   꺼져 있거나 오류·엉뚱한 답이면 claude 로 넘긴다
@@ -24,9 +25,12 @@ import difflib
 import hashlib
 import html
 import json
+import os
+import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -63,6 +67,11 @@ DEFAULTS = {
     "examples": 15,                # 프롬프트에 넣을 👍, 👎 각각의 최대 개수
     "dup_ratio": 0.6,              # 최근 알린 제목과 이만큼 비슷하면 알리지 않는다
     "hide_max_score": 3,           # 판별 목록에서 이 점수 이하는 기본으로 숨긴다 (👍·🔔10 준 것은 보인다)
+    "tts": True,                   # 알림을 말로도 읽는다: 말머리 소리 → 제목을 줄인 말 ("이란 휴전안 거부")
+    "tts_voice": "ko-KR-SunHiNeural",   # Edge 읽어주기 음성. 안 되면 윈도우 기본 음성(SAPI)
+    "tts_rate": "+0%",
+    "tts_chime": r"C:\Windows\Media\Windows Notify Messaging.wav",   # RSI 알림(Speech On)과 다른 소리
+    "tts_quiet": "",               # 말하지 않을 시간대, 예: "23-07". 비우면 늘 말한다 (토스트는 그대로)
 }
 
 PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
@@ -95,7 +104,7 @@ PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
 {news}
 
 JSON 만 출력하라. 다른 말은 쓰지 마라.
-{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "왜 관심 있을지 15자 이내 한국어", "topic": "사건 이름"}}]}}
+{{"results": [{{"i": 번호, "score": 0~10 정수, "reason": "왜 관심 있을지 15자 이내 한국어", "topic": "사건 이름", "say": "제목을 소리내 읽기 좋게 12자 안팎으로 줄인 말. 예: 이란 휴전안 거부"}}]}}
 """
 
 
@@ -251,7 +260,7 @@ def ask_ollama(cfg: dict, prompt: str, timeout: float) -> str:
 
 
 def parse_results(text: str, batch: list) -> dict:
-    """{id: (score, reason, topic)}. 모델이 빠뜨린 뉴스는 결과에 없다."""
+    """{id: (score, reason, topic, say)}. 모델이 빠뜨린 뉴스는 결과에 없다."""
     try:
         items = json.loads(text).get("results", [])
     except (ValueError, AttributeError):
@@ -268,12 +277,12 @@ def parse_results(text: str, batch: list) -> dict:
             continue
         if 1 <= i <= len(batch):
             out[batch[i - 1]["id"]] = (max(0, min(10, score)), str(it.get("reason", "")).strip(),
-                                       str(it.get("topic", "")).strip())
+                                       str(it.get("topic", "")).strip(), str(it.get("say", "")).strip())
     return out
 
 
 def judge(cfg: dict, batch: list, topics: list = ()) -> tuple:
-    """({id: (score, reason, topic)}, 판별한 쪽 이름). topics 는 최근에 붙인 사건 이름."""
+    """({id: (score, reason, topic, say)}, 판별한 쪽 이름). topics 는 최근에 붙인 사건 이름."""
     prompt = PROMPT.format(
         interests=INTERESTS.read_text(encoding="utf-8") if INTERESTS.exists() else "(없음)",
         examples=examples_text(cfg["examples"]),
@@ -300,6 +309,104 @@ def judge(cfg: dict, batch: list, topics: list = ()) -> tuple:
 # 알림
 # ─────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────
+# 음성
+# ─────────────────────────────────────────────────────────────
+
+def _mci(cmd: str):
+    import ctypes
+    err = ctypes.windll.winmm.mciSendStringW(cmd, None, 0, None)
+    if err:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.winmm.mciGetErrorStringW(err, buf, 256)
+        raise OSError(f"MCI {err}: {buf.value}")
+
+
+def play_file(path: str):
+    """소리 파일을 끝까지 틀고 돌아온다."""
+    kind = "waveaudio" if path.lower().endswith(".wav") else "mpegvideo"
+    _mci(f'open "{path}" type {kind} alias newsalert')
+    try:
+        _mci("play newsalert wait")
+    finally:
+        _mci("close newsalert")
+
+
+def _speak_edge(cfg: dict, text: str):
+    import asyncio
+    import edge_tts
+    fd, tmp = tempfile.mkstemp(prefix="news_tts_", suffix=".mp3")
+    os.close(fd)
+    try:
+        asyncio.run(asyncio.wait_for(
+            edge_tts.Communicate(text, cfg["tts_voice"], rate=cfg["tts_rate"]).save(tmp), 15))
+        play_file(tmp)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _speak_sapi(text: str):
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    try:
+        win32com.client.Dispatch("SAPI.SpVoice").Speak(text)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def speak(cfg: dict, text: str) -> str:
+    """말머리 소리를 내고 text 를 읽는다. 실제로 읽은 길('edge'·'sapi'·'')을 돌려준다."""
+    chime = cfg.get("tts_chime")
+    if chime and os.path.exists(chime):
+        try:
+            play_file(chime)
+        except OSError:
+            pass
+    try:
+        _speak_edge(cfg, text)
+        return "edge"
+    except Exception as e:
+        log(f"edge 음성 실패 → SAPI: {type(e).__name__}: {str(e)[:100]}")
+    try:
+        _speak_sapi(text)
+        return "sapi"
+    except Exception as e:
+        log(f"SAPI 도 실패: {type(e).__name__}: {e}")
+        return ""
+
+
+def quiet_now(cfg: dict) -> bool:
+    """tts_quiet("23-07") 시간대 안인가."""
+    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", cfg.get("tts_quiet") or "")
+    if not m:
+        return False
+    a, b, h = int(m[1]), int(m[2]), datetime.now().hour
+    return a <= h < b if a <= b else h >= a or h < b
+
+
+_speech = queue.Queue()
+
+
+def _speech_worker(cfg: dict):
+    # 한 판별 묶음에서 알림이 여럿 나와도 겹치지 않게 차례로 읽는다. 판별은 기다리지 않는다.
+    while True:
+        text = _speech.get()
+        try:
+            speak(cfg, text)
+        except Exception as e:
+            log(f"음성 오류: {type(e).__name__}: {e}")
+
+
+def say_alert(cfg: dict, text: str):
+    if not cfg["tts"] or quiet_now(cfg) or not text:
+        return
+    _speech.put(text)
+
+
 def toast(cfg: dict, r: dict, score: int, reason: str):
     try:
         from winotify import Notification, audio
@@ -309,7 +416,9 @@ def toast(cfg: dict, r: dict, score: int, reason: str):
     fb = f"http://127.0.0.1:{cfg['port']}/fb?id={r['id']}"
     n = Notification(app_id="SaveTicker 뉴스", title=f"[{score}점] {reason}",
                      msg=r["title"][:200], launch=r["url"])
-    n.set_audio(audio.Default, loop=False)
+    # 말로 읽을 때는 토스트 소리를 끈다. 말머리 소리와 겹치면 뉴스 알림인지 헷갈린다
+    speaking = cfg["tts"] and not quiet_now(cfg)
+    n.set_audio(audio.Silent if speaking else audio.Default, loop=False)
     n.add_actions(label="👍 관심", launch=fb + "&v=1")
     n.add_actions(label="👎 별로", launch=fb + "&v=0")
     n.show()
@@ -389,14 +498,14 @@ class Watcher:
             for r in batch:
                 if r["id"] not in result:
                     continue
-                score, reason, topic = result[r["id"]]
+                score, reason, topic, say = result[r["id"]]
                 # 같은 사건(시진핑 발언 문장마다 뜨는 속보 등)은 한 시간에 한 번만 알린다
                 late = self.is_late(r)
                 alert = (score >= self.cfg["threshold"] and not late and not self.topic_alerted(topic)
                          and not self.is_dup(r["title"]))
                 rec = {"id": r["id"], "title": r["title"], "url": r["url"], "source": r.get("source", ""),
                        "created_at": r["created_at"], "score": score, "reason": reason, "topic": topic,
-                       "alerted": alert, "late": late, "by": by,
+                       "say": say, "alerted": alert, "late": late, "by": by,
                        "at": datetime.now(KST).isoformat(timespec="seconds")}
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
@@ -405,6 +514,7 @@ class Watcher:
                 if alert:
                     self.recent_alerts.append((time.time(), r["title"]))
                     toast(self.cfg, r, score, reason)
+                    say_alert(self.cfg, say or topic or reason)
 
     def run(self):
         log(f"감시 시작: {DATA}  (모델 {self.cfg['model']}, 기준 {self.cfg['threshold']}점)")
@@ -671,9 +781,16 @@ def main():
     ap = argparse.ArgumentParser(description="세이브티커 관심 뉴스 알림")
     ap.add_argument("--test", type=int, metavar="N", help="최근 N건만 판별해 출력하고 끝낸다")
     ap.add_argument("--before", metavar="TIME", help="--test 에서 이 한국 시각까지의 뉴스만 (예: '2026-09-24 23:50')")
+    ap.add_argument("--say", metavar="TEXT", help="음성 알림을 한 번 내 보고 끝낸다")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     cfg = load_config()
+
+    if args.say:
+        t0 = time.time()
+        by = speak(cfg, args.say)
+        print(f"{by or '못 읽음'} · {time.time() - t0:.1f}초")
+        return
 
     if args.test:
         rows = sorted(read_news(), key=lambda r: r["ts"])
@@ -690,9 +807,9 @@ def main():
             res, by = judge(cfg, batch, topics)
             log(f"{len(batch)}건 판별 {time.time() - t0:.1f}초 ({by})")
             for r in batch:
-                score, reason, topic = res.get(r["id"], (None, "(응답 없음)", ""))
+                score, reason, topic, say = res.get(r["id"], (None, "(응답 없음)", "", ""))
                 mark = "🔔" if score is not None and score >= cfg["threshold"] else "  "
-                print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — {reason}")
+                print(f"{mark} {score if score is not None else '-':>2} [{topic}] {r['title'][:70]}  — {reason}  🗣 {say}")
                 if topic and topic not in topics:
                     topics.insert(0, topic)
         return
@@ -705,6 +822,7 @@ def main():
         log(f"포트 {cfg['port']} 를 쓸 수 없다 ({e}). 이미 실행 중이거나, {CONFIG.name} 의 port 를 바꿔라.")
         sys.exit(3)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=_speech_worker, args=(cfg,), daemon=True).start()
     log(f"판별 목록: http://127.0.0.1:{cfg['port']}/")
     try:
         watcher.run()

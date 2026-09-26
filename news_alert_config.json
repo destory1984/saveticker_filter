@@ -15,5 +15,10 @@
  "dup_ratio": 0.6,
  "max_wait_sec": 90,
  "ollama_timeout_sec": 90,
- "hide_max_score": 3
+ "hide_max_score": 3,
+ "tts": true,
+ "tts_voice": "ko-KR-SunHiNeural",
+ "tts_rate": "+0%",
+ "tts_chime": "C:\\Windows\\Media\\Windows Notify Messaging.wav",
+ "tts_quiet": ""
 }
