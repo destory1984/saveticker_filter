@@ -890,7 +890,11 @@ def make_handler(watcher: Watcher):
                 self.end_headers()
                 self.wfile.write(data)
             elif u.path == "/":
-                self.send_page(page(watcher, q.get("done"), bool(q.get("all"))))
+                try:
+                    n = max(PAGE_LINES, min(2000, int(q.get("n", PAGE_LINES))))
+                except ValueError:
+                    n = PAGE_LINES
+                self.send_page(page(watcher, q.get("done"), bool(q.get("all")), n))
             elif u.path == "/stats":
                 self.send_page(stats_page(watcher))
             elif u.path == "/topic" and q.get("name"):
@@ -956,7 +960,10 @@ SOURCE_NAMES = {"reuters": "Reuters", "로이터": "Reuters", "financial-juice":
 FB_LABELS = {"10": "🔔10점", "1": "👍", "0": "👎", "00": "🔕0점"}
 
 
-def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
+PAGE_LINES = 30   # 판별 목록 한 번에 보이는 줄 수. 같은 사건 묶음은 한 줄로 센다. "더 보기" 로 이만큼씩 늘린다
+
+
+def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES) -> str:
     fb = {k: fb_key(v) for k, v in latest_feedback().items()}
     recs = sorted(watcher.judged.values(), key=lambda r: r.get("created_at", ""), reverse=True)
     # 👎·0점 준 뉴스와 점수가 낮은 뉴스는 기본으로 숨긴다.
@@ -971,7 +978,7 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
     hidden = 0 if show_all else sum(1 for r in recs if hide(r))
     if not show_all:
         recs = [r for r in recs if not hide(r)]
-    recs = recs[:150]
+    recs = recs[:1000]
     qs = "&all=1" if show_all else ""
     # 같은 사건(topic)은 가장 최근 뉴스 한 줄로 접는다. 6시간 넘게 떨어지면 다른 묶음으로 본다.
     heads, members, order = {}, {}, []
@@ -985,6 +992,9 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
                 heads[tp] = r
             members[r["id"]] = []
             order.append(r)
+    # 뉴스가 쌓이면 화면이 끝없이 길어진다. 최근 n 줄만 그리고 맨 아래 "더 보기" 를 둔다.
+    left = len(order) - n
+    order = order[:n]
     rows = []
     for head in order:
         kids = members[head["id"]]
@@ -994,6 +1004,9 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False) -> str:
                if kids else "")
         rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves))
         rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves) for k in kids)
+    if left > 0:
+        rows.append(f"<tr><td colspan=4 class=more><a class=more href='/?n={n + PAGE_LINES}{qs}'>"
+                    f"더 보기 ({min(left, PAGE_LINES)}줄 더 · 남은 {left}줄)</a></td></tr>")
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
     return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v),
                      recent_alerts_html(watcher))
@@ -1071,7 +1084,7 @@ body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16p
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
 .b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
-a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
+td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
 </style>
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
@@ -1103,6 +1116,8 @@ async function refresh() {{
   if (keep && Date.now() - keepAt > 10000) keep = null;
   const params = new URLSearchParams({{{"all: 1" if show_all else ""}}});
   if (keep) params.set("done", keep);
+  const n = new URLSearchParams(location.search).get("n");   // "더 보기" 로 늘린 줄 수는 갱신 뒤에도 그대로
+  if (n) params.set("n", n);
   try {{
     const r = await fetch("/?" + params, {{cache: "no-store"}});
     const doc = new DOMParser().parseFromString(await r.text(), "text/html");
@@ -1134,6 +1149,14 @@ document.getElementById("list").addEventListener("click", async (e) => {{
   if (g) {{
     opened.has(g.dataset.g) ? opened.delete(g.dataset.g) : opened.add(g.dataset.g);
     applyOpen();
+    return;
+  }}
+  const m = e.target.closest("a.more");
+  if (m) {{
+    // 페이지를 옮기면 맨 위로 튄다. 주소만 바꾸고 목록만 다시 받는다
+    e.preventDefault();
+    history.replaceState(null, "", m.href);
+    await refresh();
     return;
   }}
   const a = e.target.closest("a.fb");
