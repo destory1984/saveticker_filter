@@ -1305,9 +1305,11 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
 
 def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int,
               recent: str = "") -> str:
-    note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다. "
-    note += ("<a href='/' style='text-decoration:underline'>숨기기</a></p>" if show_all else
-             f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다. <a href='/?all=1' style='text-decoration:underline'>모두 보기</a></p>")
+    # 모두 보기/숨기기 단추는 줄 맨 앞에 둔다 (설명 글 끝에 있으면 찾기 힘들다)
+    note += ("<p class=why><a href='/' style='text-decoration:underline'>숨기기</a> 숨긴 뉴스까지 모두 보는 중</p>" if show_all else
+             f"<p class=why><a href='/?all=1' style='text-decoration:underline'>모두 보기</a> "
+             f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다.</p>")
+    note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다.</p>"
     return f"""<!doctype html><meta charset=utf-8><title>saveticker 필터링</title>
 <style>
 body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
