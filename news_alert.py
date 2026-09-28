@@ -230,9 +230,16 @@ def latest_feedback() -> dict:
     return fb
 
 
+# 👎·🔕0 을 누른 뒤 고르는 까닭. 판별 프롬프트의 [과거 반응] 에 "(까닭: …)" 으로 붙는다.
+# stocknews_filter 와 같은 10개에서, 시장 뉴스라 맞지 않는 "시장 전체 시황"·"다른 회사가 주인공" 을 바꿨다
+WHY_CHOICES = ("옛 기사", "이미 본 내용", "확정 안 된 설", "숫자 없는 전망", "개인 의견·투자 조언", "수상·협약·홍보",
+               "단순 시세·수급", "관심 없는 나라·업종", "사건·사고 가십", "그 밖에 시장 영향 적음")
+
+
 def examples_text(n: int) -> str:
     recs = sorted(latest_feedback().values(), key=lambda x: x.get("at", ""), reverse=True)
-    groups = {k: [r["title"] for r in recs if fb_key(r) == k] for k in FB_VALUES}
+    groups = {k: [r["title"] + (f" (까닭: {r['why']})" if r.get("why") else "") for r in recs if fb_key(r) == k]
+              for k in FB_VALUES}
     # 10점·0점은 드물고 중요하니 더 많이 남긴다
     lines = ([f"🔔 {t}" for t in groups["10"][:n * 2]] + [f"👍 {t}" for t in groups["1"][:n]]
              + [f"👎 {t}" for t in groups["0"][:n]] + [f"🔕 {t}" for t in groups["00"][:n * 2]])
@@ -1082,6 +1089,15 @@ def make_handler(watcher: Watcher):
                 self.send_header("Location", f"/?done={rec['id']}" + ("&all=1" if q.get("all") else "")
                                  + ("&pick=1" if q.get("pick") else ""))
                 self.end_headers()
+            elif u.path == "/fbwhy":   # 👎·🔕0 을 누른 까닭
+                last = latest_feedback().get(q.get("id"))
+                if q.get("id") in watcher.judged and q.get("why") in WHY_CHOICES and fb_key(last) in ("0", "00"):
+                    append_jsonl(FEEDBACK, dict(last, why=q["why"]))
+                    log(f"까닭 [{q['why']}] {last['title'][:70]}")
+                    self.send_response(204)
+                else:
+                    self.send_response(400)
+                self.end_headers()
             elif u.path == "/ping":
                 # 확장의 감시견이 1분마다 보낸다. 판별기는 이것이 끊기면 수집이 멈춘 줄 안다
                 try:
@@ -1190,7 +1206,9 @@ PAGE_LINES = 50   # 판별 목록에 한 번에 싣는 뉴스 수 (묶음 안의
 
 def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES,
          pick: bool = False) -> str:
-    fb = {k: fb_key(v) for k, v in latest_feedback().items()}
+    fbrecs = latest_feedback()
+    fb = {k: fb_key(v) for k, v in fbrecs.items()}
+    whys = {k: v.get("why", "") for k, v in fbrecs.items()}
     recs = sorted(watcher.judged.values(), key=lambda r: r.get("created_at", ""), reverse=True)
     # 👎·0점 준 뉴스와 점수가 낮은 뉴스는 기본으로 숨긴다.
     # 방금 누른 것은 기록됐다는 표시를 위해, 👍·10점 준 것은 점수와 상관없이 남긴다.
@@ -1230,8 +1248,10 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
         # 가장 오래된 뉴스를 섞는다. 새 뉴스는 위에 붙으니 자동 갱신 뒤에도 id 가 그대로다.
         gid = (hashlib.md5(f"{head.get('topic', '')}|{kids[-1]['id']}".encode()).hexdigest()[:10]
                if kids else "")
-        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves, market=watcher.market))
-        rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves, market=watcher.market) for k in kids)
+        rows.append(row_html(head, fb, done, qs, gid=gid, kids=kids, moves=watcher.moves, market=watcher.market,
+                             whys=whys))
+        rows.extend(row_html(k, fb, done, qs, child_of=gid, moves=watcher.moves, market=watcher.market, whys=whys)
+                    for k in kids)
     if left > 0:
         rows.append(f"<tr><td colspan=4 class=more><a class=more href='/?n={n + PAGE_LINES}{qs}'>"
                     f"더 보기 (뉴스 {min(left, PAGE_LINES)}개 더 · 남은 {left}개)</a></td></tr>")
@@ -1298,8 +1318,19 @@ def reasons_html(r: dict) -> str:
     return pro + f"<span style='color:#d9918f;margin-left:4px'>－ {html.escape(r['con'])}</span>"
 
 
+def why_html(nid: str, state, why: str) -> str:
+    """👎·🔕0 을 누른 뉴스 밑: 고른 까닭, 아직 안 골랐으면 고를 단추들."""
+    if state not in ("0", "00"):
+        return ""
+    if why:
+        return f"<div class=whyset>까닭: {html.escape(why)}</div>"
+    return ("<div class=whypick>까닭? " + "".join(
+        f"<a class=whyc data-id='{nid}' data-why='{html.escape(w, quote=True)}'>{html.escape(w)}</a>"
+        for w in WHY_CHOICES) + "</div>")
+
+
 def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), child_of: str = "",
-             moves: dict = None, market: dict = None) -> str:
+             moves: dict = None, market: dict = None, whys: dict = None) -> str:
     t = parse_ts(r.get("created_at", ""))
     when = t.astimezone(KST).strftime("%m-%d %H:%M") if t else ""
     state = fb.get(r["id"])   # "10" / "1" / "0" / "00" / None
@@ -1332,7 +1363,8 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
         f"<tr{cls}><td class=b>{btns}</td>"
         f"<td class=t>{when}</td><td class=s>{r['score']}{by}</td>"
         f"<td><a{' class=rated' if state else ''} href='{html.escape(r['url'])}' target=_blank>{html.escape(r['title'])}</a>"
-        f"<div class=why>{src}{topic}{reasons_html(r)}{mv}{group}</div></td></tr>")
+        f"<div class=why>{src}{topic}{reasons_html(r)}{mv}{group}</div>"
+        f"{why_html(r['id'], state, (whys or {}).get(r['id'], ''))}</td></tr>")
 
 
 def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int,
@@ -1353,7 +1385,7 @@ def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int,
 body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
 a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
-.b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
+.b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} .whypick{{margin-top:3px;font-size:.86em;color:#d9918f}} .whypick a.whyc{{display:inline-block;margin:0 4px 2px 0;padding:0 7px;border-radius:10px;background:#3a2a2c;color:#e6c3c1;cursor:pointer}} .whypick a.whyc:hover{{background:#5a3a3d}} .whyset{{margin-top:2px;font-size:.8em;color:#8a9099}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
 .stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} .mv.mk{{background:#1f2633;color:#9fb3d1}} .mv.mk.hot{{background:#3a3320;color:#f0c674}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
 </style>
@@ -1383,7 +1415,7 @@ document.getElementById("reset-all").onclick = (e) => resetRecords("all",
 // 방금 누른 뉴스는 10초 동안 목록에 남긴다 (👎 해도 바로 사라지지 않게, 잘못 누르면 되돌릴 수 있게)
 let keep = null, keepAt = 0;
 async function refresh() {{
-  if (keep && Date.now() - keepAt > 10000) keep = null;
+  if (keep && Date.now() - keepAt > 30000) keep = null;   // 👎 뒤 까닭을 고를 틈으로 30초
   const params = new URLSearchParams({{{"all: 1" if show_all else ""}}});
   if (keep) params.set("done", keep);
   const n = new URLSearchParams(location.search).get("n");   // "더 보기" 로 늘린 줄 수는 갱신 뒤에도 그대로
@@ -1416,6 +1448,14 @@ function applyOpen() {{
 
 // 👍/👎 는 페이지를 옮기지 않고 기록한다. 그래서 스크롤 위치가 그대로 남는다.
 document.getElementById("list").addEventListener("click", async (e) => {{
+  const wc = e.target.closest("a.whyc");
+  if (wc) {{   // 👎·🔕0 을 누른 까닭
+    await fetch("/fbwhy?" + new URLSearchParams({{id: wc.dataset.id, why: wc.dataset.why}}), {{cache: "no-store"}});
+    keep = wc.dataset.id;
+    keepAt = Date.now();
+    await refresh();
+    return;
+  }}
   const g = e.target.closest("a.grp");
   if (g) {{
     opened.has(g.dataset.g) ? opened.delete(g.dataset.g) : opened.add(g.dataset.g);
