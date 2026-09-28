@@ -936,7 +936,7 @@ class Watcher:
         if alert:
             self.recent_alerts.append((time.time(), r["title"]))
             toast(self.cfg, r, PICK_SCORE, done.get("reason", ""))
-            say_alert(self.cfg, done.get("say") or done.get("topic") or done.get("reason", ""))
+            say_alert(self.cfg, "세이브, " + (done.get("say") or done.get("topic") or done.get("reason", "")))
 
     def is_late(self, r: dict) -> bool:
         """알리기엔 늦은 뉴스인가. PC 가 잠든 사이 나온 뉴스를 깨어나서 한꺼번에 울리지 않게."""
@@ -986,7 +986,8 @@ class Watcher:
                 if alert:
                     self.recent_alerts.append((time.time(), r["title"]))
                     toast(self.cfg, r, score, reason)
-                    say_alert(self.cfg, say or topic or reason)
+                    # 주요뉴스는 "세이브" 를 먼저 말해 들어서도 가린다
+                    say_alert(self.cfg, ("세이브, " if pick else "") + (say or topic or reason))
 
     def woke(self) -> None:
         """PC 가 잠들었다 깼다. 밀린 뉴스를 다 판별하면 요약을 알린다."""
@@ -1078,7 +1079,8 @@ def make_handler(watcher: Watcher):
                     self.end_headers()
                     return
                 self.send_response(303)
-                self.send_header("Location", f"/?done={rec['id']}" + ("&all=1" if q.get("all") else ""))
+                self.send_header("Location", f"/?done={rec['id']}" + ("&all=1" if q.get("all") else "")
+                                 + ("&pick=1" if q.get("pick") else ""))
                 self.end_headers()
             elif u.path == "/ping":
                 # 확장의 감시견이 1분마다 보낸다. 판별기는 이것이 끊기면 수집이 멈춘 줄 안다
@@ -1111,7 +1113,7 @@ def make_handler(watcher: Watcher):
                     n = max(PAGE_LINES, min(2000, int(q.get("n", PAGE_LINES))))
                 except ValueError:
                     n = PAGE_LINES
-                self.send_page(page(watcher, q.get("done"), bool(q.get("all")), n))
+                self.send_page(page(watcher, q.get("done"), bool(q.get("all")), n, bool(q.get("pick"))))
             elif u.path == "/stats":
                 self.send_page(stats_page(watcher))
             elif u.path == "/briefing":
@@ -1186,7 +1188,8 @@ FB_LABELS = {"10": "🔔10점", "1": "👍", "0": "👎", "00": "🔕0점"}
 PAGE_LINES = 50   # 판별 목록에 한 번에 싣는 뉴스 수 (묶음 안의 뉴스도 센다). "더 보기" 로 이만큼씩 늘린다
 
 
-def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES) -> str:
+def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PAGE_LINES,
+         pick: bool = False) -> str:
     fb = {k: fb_key(v) for k, v in latest_feedback().items()}
     recs = sorted(watcher.judged.values(), key=lambda r: r.get("created_at", ""), reverse=True)
     # 👎·0점 준 뉴스와 점수가 낮은 뉴스는 기본으로 숨긴다.
@@ -1198,13 +1201,16 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
             return False
         return fb.get(r["id"]) in ("0", "00") or r["score"] <= low
 
+    n_pick = sum(1 for r in recs if r.get("pick"))
+    if pick:   # 주요뉴스만: 👎 준 것도 숨기지 않는다
+        recs, show_all = [r for r in recs if r.get("pick")], True
     hidden = 0 if show_all else sum(1 for r in recs if hide(r))
     if not show_all:
         recs = [r for r in recs if not hide(r)]
     # 뉴스가 쌓이면 화면이 끝없이 길어진다. 최근 n 건만 그리고 맨 아래 "더 보기" 를 둔다.
     left = len(recs) - n
     recs = recs[:n]
-    qs = "&all=1" if show_all else ""
+    qs = "&pick=1" if pick else "&all=1" if show_all else ""
     # 같은 사건(topic)은 가장 최근 뉴스 한 줄로 접는다. 6시간 넘게 떨어지면 다른 묶음으로 본다.
     heads, members, order = {}, {}, []
     for r in recs:
@@ -1231,7 +1237,7 @@ def page(watcher: Watcher, done: str = None, show_all: bool = False, n: int = PA
                     f"더 보기 (뉴스 {min(left, PAGE_LINES)}개 더 · 남은 {left}개)</a></td></tr>")
     note = "<p class=ok>반응을 기록했사옵니다. 다음 판별부터 반영됩니다.</p>" if done else ""
     return page_html(watcher, rows, note, show_all, low, hidden, sum(1 for v in fb.values() if v),
-                     recent_alerts_html(watcher))
+                     recent_alerts_html(watcher), pick, n_pick)
 
 
 def recent_alerts_html(watcher: Watcher) -> str:
@@ -1330,11 +1336,17 @@ def row_html(r: dict, fb: dict, done: str, qs: str, gid: str = "", kids=(), chil
 
 
 def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int, hidden: int, n_fb: int,
-              recent: str = "") -> str:
+              recent: str = "", pick: bool = False, n_pick: int = 0) -> str:
     # 모두 보기/숨기기 단추는 줄 맨 앞에 둔다 (설명 글 끝에 있으면 찾기 힘들다)
-    note += ("<p class=why><a href='/' style='text-decoration:underline'>숨기기</a> 숨긴 뉴스까지 모두 보는 중</p>" if show_all else
-             f"<p class=why><a href='/?all=1' style='text-decoration:underline'>모두 보기</a> "
-             f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다.</p>")
+    u = "style='text-decoration:underline'"
+    if pick:
+        note += (f"<p class=why><a href='/' {u}>모든 뉴스</a> 🔥 세이브티커 주요뉴스(SAVE PICK) {n_pick}건만 보는 중"
+                 " — 👎 준 것도 숨기지 않습니다</p>")
+    else:
+        only = f"<a href='/?pick=1' {u}>🔥 주요뉴스만</a> "
+        note += (f"<p class=why><a href='/' {u}>숨기기</a> {only}숨긴 뉴스까지 모두 보는 중</p>" if show_all else
+                 f"<p class=why><a href='/?all=1' {u}>모두 보기</a> {only}"
+                 f"👎·🔕0 준 뉴스와 {low}점 이하 뉴스 {hidden}건은 숨겼습니다.</p>")
     note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다.</p>"
     return f"""<!doctype html><meta charset=utf-8><title>saveticker 필터링</title>
 <style>
@@ -1376,6 +1388,7 @@ async function refresh() {{
   if (keep) params.set("done", keep);
   const n = new URLSearchParams(location.search).get("n");   // "더 보기" 로 늘린 줄 수는 갱신 뒤에도 그대로
   if (n) params.set("n", n);
+  if (new URLSearchParams(location.search).get("pick")) params.set("pick", 1);   // 주요뉴스만 보는 중
   try {{
     const r = await fetch("/?" + params, {{cache: "no-store"}});
     const doc = new DOMParser().parseFromString(await r.text(), "text/html");
