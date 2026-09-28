@@ -2,6 +2,8 @@
 // the page-fetch / watch jobs requested from the popup.
 const MARK = "__saveticker_collector__";
 const API = "/api/news/list";
+const TOP_API = "/api/news/top-stories";   // 페이지의 "오늘 주요뉴스" (세이브티커 편집자가 고른 SAVE PICK)
+const PICK = "[SAVE PICK] ";
 const MAX_ITEMS = 5000;
 
 function toRow(it) {
@@ -9,7 +11,9 @@ function toRow(it) {
   return {
     id: it.id,
     created_at: it.created_at || "",
-    title: (it.title || "").trim(),
+    // 주요뉴스는 제목 앞에 표시를 붙인다. 판별기는 이 표시를 보고 9점을 준다.
+    // 올라온 뒤에 뽑히기도 해서, 뽑히면 제목이 바뀐 것으로 보고 CSV 를 다시 쓴다.
+    title: (it.is_top_story ? PICK : "") + (it.title || "").trim(),
     title_en: (en.title || "").trim(),
     source: it.source || it.author_name || "",
     tickers: (it.tickers || []).map((t) => t.symbol).join(" "),
@@ -95,6 +99,11 @@ async function watchTick() {
     // 그 뒤로는 한 페이지가 통째로 처음 보는 뉴스일 때만 더 거슬러 간다.
     // PC 가 잠들었거나 탭이 재워졌던 사이의 뉴스를 깨어나서 메운다.
     let added = 0;
+    // 주요뉴스는 올라온 지 몇 시간 뒤에 뽑히기도 하니 목록과 따로 받는다
+    try {
+      const tr = await fetch(TOP_API, { credentials: "include" });
+      if (tr.ok) await store((await tr.json()).news_list || []);
+    } catch (_) {}   // 주요뉴스를 못 받아도 목록 감시는 계속한다
     for (let p = 1; p <= CATCHUP_PAGES; p++) {
       if (p > 2) await sleep(500);
       const items = await fetchPage(p);

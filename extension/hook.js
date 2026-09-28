@@ -1,8 +1,10 @@
-// Runs in the page's own JS world. Mirrors every /api/news/list response the
-// page receives to content.js via postMessage; the page itself is untouched.
+// Runs in the page's own JS world. Mirrors every /api/news/list and
+// /api/news/top-stories response the page receives to content.js via
+// postMessage; the page itself is untouched.
 (() => {
   const MARK = "__saveticker_collector__";
-  const isNewsList = (url) => typeof url === "string" && url.includes("/api/news/list");
+  const isNewsList = (url) => typeof url === "string" &&
+    (url.includes("/api/news/list") || url.includes("/api/news/top-stories"));
   const emit = (url, data) => {
     if (data && Array.isArray(data.news_list)) {
       window.postMessage({ [MARK]: true, url, items: data.news_list }, location.origin);

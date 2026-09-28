@@ -52,6 +52,10 @@ BRIEFING = BASE / "briefing.json"        # 장 열기 전 브리핑 (마지막 �
 
 KST = timezone(timedelta(hours=9))
 
+# 세이브티커 "오늘 주요뉴스"(편집자가 고른 SAVE PICK). 확장이 제목 앞에 붙여 준다. 점수는 무조건 이것
+PICK = "[SAVE PICK]"
+PICK_SCORE = 9
+
 DEFAULTS = {
     "backend": "auto",             # "auto" (ollama 먼저, 안 되면 claude), "claude", "ollama"
     "claude_model": "sonnet",
@@ -877,7 +881,8 @@ class Watcher:
     def is_dup(self, title: str) -> bool:
         cutoff = time.time() - 3600
         self.recent_alerts = [(t, s) for t, s in self.recent_alerts if t > cutoff]
-        return any(difflib.SequenceMatcher(None, title, s).ratio() >= self.cfg["dup_ratio"]
+        bare = lambda s: s.removeprefix(PICK).strip()   # 머리말이 같다고 같은 뉴스로 보지 않게
+        return any(difflib.SequenceMatcher(None, bare(title), bare(s)).ratio() >= self.cfg["dup_ratio"]
                    for _, s in self.recent_alerts)
 
     def recent(self, hours: float) -> list:
@@ -909,6 +914,8 @@ class Watcher:
         for r in read_news():
             done = self.judged.get(r["id"])
             if done:   # 목록 표시용으로만 최신 값을 반영한다
+                if r["title"].startswith(PICK) and not done.get("pick"):
+                    self.mark_pick(done, r)   # 판별한 뒤에 주요뉴스로 뽑혔다
                 done["title"] = r["title"]   # 원문 제목이 나중에 한글로 바뀐 경우
                 done.setdefault("source", r.get("source", ""))
             if done or r["id"] in seen or r["ts"] < cutoff:
@@ -916,6 +923,20 @@ class Watcher:
             seen.add(r["id"])
             out.append(r)
         return sorted(out, key=lambda r: (self.is_late(r), r["ts"]))
+
+    def mark_pick(self, done: dict, r: dict):
+        """이미 판별한 뉴스가 나중에 주요뉴스로 뽑혔다. 9점으로 올리고, 아직 알리지 않았고 늦지 않았으면 알린다.
+        몇 시간 뒤에 뽑힌 것은 다른 늦은 뉴스처럼 목록에만 올린다 (켜자마자 옛 주요뉴스가 한꺼번에 울리지 않게)."""
+        alert = (not done.get("alerted") and not self.is_late(r)
+                 and not self.topic_alerted(done.get("topic", "")) and not self.is_dup(r["title"]))
+        was = done["score"]
+        done.update(title=r["title"], score=PICK_SCORE, pick=True, alerted=bool(done.get("alerted") or alert))
+        append_jsonl(JUDGED, done)   # 같은 id 는 마지막 줄이 이긴다
+        log(f"{'🔔' if alert else '  '} {was:>2}→{PICK_SCORE} [{done.get('topic', '')}] {r['title'][:70]}")
+        if alert:
+            self.recent_alerts.append((time.time(), r["title"]))
+            toast(self.cfg, r, PICK_SCORE, done.get("reason", ""))
+            say_alert(self.cfg, done.get("say") or done.get("topic") or done.get("reason", ""))
 
     def is_late(self, r: dict) -> bool:
         """알리기엔 늦은 뉴스인가. PC 가 잠든 사이 나온 뉴스를 깨어나서 한꺼번에 울리지 않게."""
@@ -945,6 +966,9 @@ class Watcher:
                 if r["id"] not in result:
                     continue
                 score, reason, topic, say, con = result[r["id"]]
+                pick = r["title"].startswith(PICK)
+                if pick:
+                    score = PICK_SCORE
                 # 같은 사건(시진핑 발언 문장마다 뜨는 속보 등)은 한 시간에 한 번만 알린다
                 late = self.is_late(r)
                 alert = (score >= self.cfg["threshold"] and not late and not self.topic_alerted(topic)
@@ -953,6 +977,8 @@ class Watcher:
                        "created_at": r["created_at"], "score": score, "reason": reason, "con": con, "topic": topic,
                        "say": say, "tickers": r.get("tickers", ""), "alerted": alert, "late": late, "by": by,
                        "at": datetime.now(KST).isoformat(timespec="seconds")}
+                if pick:
+                    rec["pick"] = True
                 self.judged[r["id"]] = rec
                 append_jsonl(JUDGED, rec)
                 mark = "🔔" if alert else "⏰" if late and score >= self.cfg["threshold"] else "  "
