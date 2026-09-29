@@ -1209,6 +1209,7 @@ FS_BAR = """<style>
 .fszbar button:hover{background:#23272e} .fszbar button:disabled{opacity:.4;cursor:default}
 .fszbar button:first-child{border-radius:99px 0 0 99px;border-right:0} .fszbar button:last-child{border-radius:0 99px 99px 0}
 h2{padding-right:110px}
+h2 small,h2 small.why,h2 .nav a{font-size:calc(var(--fs) * .93)}  /* 제목 옆 설명·링크는 제목 크기가 아니라 기본 글자 크기를 따른다 */
 </style>
 <span class=fszbar><button id=fsdown title="글자 작게" aria-label="글자 작게">가-</button><button id=fsup title="글자 크게" aria-label="글자 크게">가+</button></span>
 <script>
