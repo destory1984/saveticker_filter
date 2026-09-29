@@ -39,6 +39,7 @@ Edge 확장 (extension/)          news_alert.py
 |---|---|
 | `extension/` | Edge/Chrome 확장. 페이지가 받는 `/api/news/list` 응답을 기록하고, 실시간 감시로 1·2페이지를 주기적으로 확인한다. PC 가 잠들었다 깨는 등으로 빈 시간이 생기면 최대 30페이지까지 거슬러 받는다. 날짜별 CSV 를 `다운로드\saveticker\` 에 저장한다 |
 | `news_alert.py` | CSV 의 새 뉴스를 판별해 알림을 띄우고, 판별 목록 페이지를 연다 |
+| `targets.py` | 목표가 뉴스 고르기, 회사·증권사·목표가 뽑기 프롬프트, 같은 조치 합치기 (`/targets` 목표가 표) |
 | `interests.md` | 판별 기준이 되는 관심사. 고치면 다음 판별부터 반영된다 |
 | `news_alert_config.json` | 모델, 기준 점수, 포트 등 설정 |
 | `news_alert_bg.vbs` / `news_alert_stop.bat` | 창 없이 백그라운드 실행 / 종료 |
@@ -111,6 +112,18 @@ Edge 확장 (extension/)          news_alert.py
   **`interests.md` 는 고치지 않는다.** 고칠지는 직접 정한다. 제안은 `interests_suggest.json`.
 
   ![점수 성적표와 관심사 고침 제안](docs/screenshot_stats.png)
+
+- **목표가 표** (`/targets`): 최근 30일 애널리스트 목표가·투자의견 조치를 모은다. 관찰 종목만이 아니라 모든 회사를 모으고,
+  `interests.md` 의 보유·관찰 종목이면 ★ 를 붙인다. 정렬은 **회사 이름 순**(회사마다 칸)과 **최신순**(`?o=new`, 한 표) 두 가지다.
+  - 제목에 목표가 낱말(price target, upgrade, 목표가, 투자의견 등)이 든 뉴스만 골라, 판별과 따로 Ollama 에
+    회사·티커·증권사·구분(상향·하향·유지·신규·의견상향·의견하향)·투자의견·목표가를 묻는다 (`targets.py`, 1분마다).
+    Ollama 가 꺼져 있으면 켜질 때까지 5분마다 다시 본다. 결과는 `news_targets.jsonl`.
+  - 개인 필자 글, 보유 지분 공시, 컨센서스, 업종 전체 의견, 임상시험 "Initiation" 같은 것은 뺀다. 목표가 숫자는 제목에 적힌 것만 쓴다.
+  - 같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합친다. stocknews_filter 의 목표가 표를 옮긴 것이다.
+  - 09-29 에 쌓여 있던 후보 13건에서 8건을 뽑았다. 처음에는 "Underperform" 을 아웃퍼폼으로, 한국어 제목의 회사와 증권사를
+    뒤바꿔 적은 것이 한 건씩 있어 프롬프트에 의견 대응표와 한국어 제목 모양을 넣었고, 다시 뽑으니 8건 모두 맞았다.
+
+  ![목표가 표](docs/targets.png)
 
 ## 처음부터 다시
 
