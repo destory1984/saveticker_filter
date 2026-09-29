@@ -1200,6 +1200,36 @@ def reset_records(watcher: Watcher, what: str) -> list:
     return moved
 
 
+# 글자 크기 단추 (가- 가+). 모든 페이지 오른쪽 위에 떠 있고, localStorage "fs" 로 이 브라우저에 기억한다.
+# 한 페이지에서 바꾸면 다른 페이지도 같은 크기. body 는 var(--fs), 안의 글자는 em 으로 적어야 따라 커진다.
+FS_BAR = """<style>
+:root{--fs:14px}
+.fszbar{position:fixed;top:10px;right:16px;z-index:5;display:inline-flex}
+.fszbar button{font:inherit;font-size:14px;border:1px solid #2e333b;background:#1c1f24;color:#e6e6e6;padding:2px 9px;cursor:pointer}
+.fszbar button:hover{background:#23272e} .fszbar button:disabled{opacity:.4;cursor:default}
+.fszbar button:first-child{border-radius:99px 0 0 99px;border-right:0} .fszbar button:last-child{border-radius:0 99px 99px 0}
+h2{padding-right:110px}
+</style>
+<span class=fszbar><button id=fsdown title="글자 작게" aria-label="글자 작게">가-</button><button id=fsup title="글자 크게" aria-label="글자 크게">가+</button></span>
+<script>
+(function () {
+  const MIN = 11, MAX = 20, down = document.getElementById("fsdown"), up = document.getElementById("fsup");
+  let n = 14;
+  try { n = +localStorage.getItem("fs") || 14; } catch (err) {}
+  function set(v) {
+    n = Math.max(MIN, Math.min(MAX, v));
+    document.documentElement.style.setProperty("--fs", n + "px");
+    try { localStorage.setItem("fs", n); } catch (err) {}
+    down.disabled = n <= MIN; up.disabled = n >= MAX;
+    down.title = `글자 작게 · 지금 ${n}px`; up.title = `글자 크게 · 지금 ${n}px`;
+  }
+  down.onclick = () => set(n - 1);
+  up.onclick = () => set(n + 1);
+  set(n);
+})();
+</script>"""
+
+
 SOURCE_NAMES = {"reuters": "Reuters", "로이터": "Reuters", "financial-juice": "FinancialJuice"}
 
 
@@ -1387,13 +1417,14 @@ def page_html(watcher: Watcher, rows: list, note: str, show_all: bool, low: int,
     note += "<p class=why>🔔10 👍 👎 🔕0 가운데 누른 것에 불이 켜집니다. 🔔10 은 '반드시 알려라', 🔕0 은 '절대 알리지 마라'로 👍/👎 보다 강하게 반영됩니다. 같은 버튼을 다시 누르면 취소됩니다.</p>"
     return f"""<!doctype html><meta charset=utf-8><title>saveticker 필터링</title>
 <style>
-body{{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
+body{{font:var(--fs) system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px}}
 table{{border-collapse:collapse;width:100%}} td{{padding:6px 8px;border-bottom:1px solid #2a2d33;vertical-align:top}}
-a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:12px}}
-.b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:16px;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:13px;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:13px}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:11px}} .by{{font-size:12px;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} .whypick{{margin-top:3px;font-size:.86em;color:#d9918f}} .whypick a.whyc{{display:inline-block;margin:0 4px 2px 0;padding:0 7px;border-radius:10px;background:#3a2a2c;color:#e6c3c1;cursor:pointer}} .whypick a.whyc:hover{{background:#5a3a3d}} .whyset{{margin-top:2px;font-size:.8em;color:#8a9099}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
-.stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} .mv.mk{{background:#1f2633;color:#9fb3d1}} .mv.mk.hot{{background:#3a3320;color:#f0c674}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
-#recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:13px}}
+a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .why{{color:#8a9099;font-size:0.86em}}
+.b,.t,.s{{width:1%;white-space:nowrap}} a.fb{{display:inline-block;margin-right:4px;padding:2px 5px;border-radius:6px;font-size:1.14em;opacity:.3;filter:grayscale(1)}} a.fb:hover{{opacity:.8}} a.fb.num{{font-weight:700;font-size:0.93em;white-space:nowrap;text-align:center;color:#fff;background:#2a2d33}} a.fb.on{{opacity:1;filter:none;background:#3a4a6b;outline:1px solid #6d8fd6}} tr.hit{{background:#1d2a45}} tr.done{{background:#2a3d23}} a.rated{{color:#8a9099}} a[href^='https://saveticker.com/news/']:not(.rated):visited{{color:#b4b9c0}} .ok{{color:#8fd18f}} .warn{{color:#e0a44a;font-size:0.93em}} .warn a{{color:#e0a44a;text-decoration:underline}} .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}} .tp{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2d2640;color:#c9b8ef;font-size:0.79em}} .by{{font-size:0.86em;font-weight:400;opacity:.75;margin-top:2px}} .by.cl{{color:#d97757}} .reset{{margin-top:24px}} .reset a{{color:#e0a44a;text-decoration:underline;cursor:pointer}} a.grp{{margin-left:8px;color:#8ab4f8;cursor:pointer;text-decoration:underline}} .whypick{{margin-top:3px;font-size:.86em;color:#d9918f}} .whypick a.whyc{{display:inline-block;margin:0 4px 2px 0;padding:0 7px;border-radius:10px;background:#3a2a2c;color:#e6c3c1;cursor:pointer}} .whypick a.whyc:hover{{background:#5a3a3d}} .whyset{{margin-top:2px;font-size:.8em;color:#8a9099}} tr.child{{display:none}} tr.child.show{{display:table-row}} tr.child td{{background:#1b1e23}} tr.child td:nth-child(4){{padding-left:56px}}
+.stall{{margin:-2px 0 6px;padding:6px 10px;border-radius:6px;background:#4a1f1f;color:#ffb4a8;font-weight:600}} td.more{{text-align:center;padding:14px}} a.more{{color:#8ab4f8;text-decoration:underline;cursor:pointer}} .mv.mk{{background:#1f2633;color:#9fb3d1}} .mv.mk.hot{{background:#3a3320;color:#f0c674}} a.tp{{color:#c9b8ef}} a.tp:hover{{text-decoration:underline}} .mv{{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:0.79em}} .mv.up{{background:#1f3a26;color:#8fd18f}} .mv.dn{{background:#3d2323;color:#f08c8c}}
+#recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:0.93em}}
 </style>
+{FS_BAR}
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/briefing' target=_blank>장 전 브리핑</a><a href='/targets' target=_blank>목표가 표</a><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
 <div id=recent>{recent}</div>
@@ -1622,7 +1653,7 @@ table.tg td{{padding:3px 8px 3px 0}} td.sk{{white-space:nowrap;font-weight:600;m
 td.d,td.br,td.ac,td.pt,td.rt,td.bl{{white-space:nowrap}} td.d{{color:#8a9099;min-width:5.5em}} td.br{{min-width:9em}}
 td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{min-width:1.5em}} td.nw{{width:100%}}
 .pct{{color:#8a9099}} ul{{margin:0;padding-left:18px}} ul.one{{list-style:none;padding:0}} summary{{cursor:pointer;color:#8ab4f8}}
-.src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:11px}}
+.src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}}
 .sort a{{color:#8ab4f8}}
 </style>
 <p class=why><a href='/' style='color:#8ab4f8'>← 판별 목록</a></p>
@@ -1634,17 +1665,17 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 
 
 SUB_CSS = """<style>
-body{font:14px system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px;max-width:1100px}
+body{font:var(--fs) system-ui,sans-serif;background:#16181c;color:#e6e6e6;margin:16px;max-width:1100px}
 table{border-collapse:collapse;margin:8px 0 20px} td,th{padding:5px 10px;border-bottom:1px solid #2a2d33;text-align:left;vertical-align:top}
 th{color:#8a9099;font-weight:500} td.n{text-align:right} tr.cur{background:#1d2a45}
-a{color:#e6e6e6;text-decoration:none} a:hover{text-decoration:underline} .why{color:#8a9099;font-size:12px}
+a{color:#e6e6e6;text-decoration:none} a:hover{text-decoration:underline} .why{color:#8a9099;font-size:0.86em}
 h3{margin:24px 0 4px} .box{padding:10px 12px;border-radius:8px;background:#1d2127;line-height:1.7}
 button{background:#2a3d5c;color:#e6e6e6;border:1px solid #6d8fd6;border-radius:6px;padding:4px 12px;cursor:pointer}
 button:disabled{opacity:.5;cursor:wait} .add{color:#8fd18f} .rm{color:#f0a36c}
-.mv{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:11px}
+.mv{display:inline-block;margin-left:8px;padding:0 5px;border-radius:4px;background:#23262c;color:#b8bec6;font-size:0.79em}
 .mv.up{background:#1f3a26;color:#8fd18f} .mv.dn{background:#3d2323;color:#f08c8c}
 .mv.mk{background:#1f2633;color:#9fb3d1} .mv.mk.hot{background:#3a3320;color:#f0c674}
-</style>"""
+</style>""" + FS_BAR
 
 
 def _pct(a: int, b: int) -> str:
