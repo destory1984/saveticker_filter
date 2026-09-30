@@ -41,6 +41,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import requests
 
 import targets
+import targets_db
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -51,7 +52,7 @@ FEEDBACK = BASE / "news_feedback.jsonl"  # 👍/👎 기록
 MOVES = BASE / "news_moves.jsonl"        # 뉴스 뒤 종목 시세 움직임
 SUGGEST = BASE / "interests_suggest.json"   # 관심사 고침 제안 (마지막 것)
 BRIEFING = BASE / "briefing.json"        # 장 열기 전 브리핑 (마지막 것)
-TARGETS = BASE / "news_targets.jsonl"    # 목표가 뉴스에서 뽑은 것 {id, items, at}. 같은 id 는 마지막 줄이 이김
+TARGETS = BASE / "news_targets.jsonl"    # 09-30 전 목표가 기록 {id, items, at}. 지금은 공용 DB(targets_db)에 적고, 이 파일은 옮길 때만 읽는다
 
 KST = timezone(timedelta(hours=9))
 
@@ -1528,9 +1529,23 @@ document.getElementById("list").addEventListener("click", async (e) => {{
 # 목표가 표 (/targets). stocknews_filter 와 같은 것을 모든 회사에 대해
 # ─────────────────────────────────────────────────────────────
 
-def read_targets() -> dict:
-    """{뉴스 id: [항목, ...]} (빈 목록 = 물어봤더니 목표가 뉴스 아님)."""
-    return {r["id"]: r.get("items", []) for r in read_jsonl(TARGETS)}
+def read_targets() -> set:
+    """목표가를 뽑으려고 이미 물어본 뉴스 id."""
+    return targets_db.checked("saveticker")
+
+
+def move_targets_to_shared(watcher: "Watcher") -> int:
+    """news_targets.jsonl 을 공용 DB 로 옮긴다 (공용 DB 에 이쪽 기록이 하나도 없을 때만). 옮긴 뉴스 수.
+    목표가 표는 stocknews_filter 와 함께 쓰는 공용 DB 에 둔다 (09-30 전하 분부)."""
+    if targets_db.count("saveticker"):
+        return 0
+    n = 0
+    for x in read_jsonl(TARGETS):
+        r = watcher.judged.get(x["id"])
+        if r:
+            targets_db.save("saveticker", r, x.get("items", []), x.get("at", ""))
+            n += 1
+    return n
 
 
 def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
@@ -1547,13 +1562,12 @@ def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
                 batch = todo[k:k + size]
                 got = targets.parse(ask_ollama(watcher.cfg, targets.build_prompt(batch), watcher.cfg["timeout_sec"]),
                                     batch)
-                at = datetime.now(KST).isoformat(timespec="seconds")
                 for r in batch:
                     if r["id"] not in got:
                         tries[r["id"]] = tries.get(r["id"], 0) + 1
                         if tries[r["id"]] < 3:
                             continue
-                    append_jsonl(TARGETS, {"id": r["id"], "items": got.get(r["id"], []), "at": at})
+                    targets_db.save("saveticker", r, got.get(r["id"], []))
                 log(f"🎯 목표가 {sum(len(v) for v in got.values())}건 뽑음 "
                     f"(뉴스 {len(batch)}건 중 {sum(1 for v in got.values() if v)}건이 목표가 뉴스)")
             down = False
@@ -1585,7 +1599,7 @@ def money(v, cur: str) -> str:
 
 
 TARGET_COLORS = {"상향": "#e06c6c", "의견상향": "#e06c6c", "하향": "#6c9be0", "의견하향": "#6c9be0",
-                 "신규": "#e0a44a", "유지": "#8a9099"}
+                 "신규": "#e0a44a", "유지": "#8a9099", "제시": "#8a9099"}
 
 
 def target_row(g: dict, stock: str = "") -> str:
@@ -1611,15 +1625,11 @@ def target_row(g: dict, stock: str = "") -> str:
 def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
     """목표가 표: 최근 days 일, 모든 회사. 같은 조치를 여러 곳이 쓰면 한 줄 (targets.group).
     order "" 는 회사마다 칸을 나눠 이름 순, "new" 는 모든 회사를 한 표에 최신순. 관찰 종목은 ★."""
+    # 공용 DB: 이쪽과 stocknews_filter 가 뽑은 것을 함께 보인다 (같은 조치는 티커로 한 줄에 합쳐진다)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = []
-    for nid, items in read_targets().items():
-        r = watcher.judged.get(nid)
-        at = parse_ts(r.get("created_at", "")) if r else None
-        if not at or at < cutoff:
-            continue
-        rows += [dict(x, at=at, title=r.get("title", ""), url=r.get("url", ""), source=r.get("source", ""),
-                      alerted=r.get("alerted")) for x in items]
+    rows = [dict(r, at=parse_ts(r["created_at"]), title=r["title_ko"] or r["title"])
+            for r in targets_db.read((cutoff - timedelta(days=1)).isoformat(timespec="seconds"))]
+    rows = [r for r in rows if r["at"] and r["at"] >= cutoff]
     rows.sort(key=lambda x: x["at"], reverse=True)
     by = {}
     for r in rows:
@@ -1643,7 +1653,8 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
         body = "".join(f"<div class=card><div><b>{title(gs)}</b> <span class=why>· {len(gs)}건</span></div>"
                        f"<table class=tg>{''.join(target_row(g) for g in gs)}</table></div>"
                        for gs in sorted(groups.values(), key=lambda gs: gs[0]["stock"].lower()))
-    todo = sum(1 for r in list(watcher.judged.values()) if r["id"] not in read_targets() and targets.is_candidate(r))
+    done = read_targets()
+    todo = sum(1 for r in list(watcher.judged.values()) if r["id"] not in done and targets.is_candidate(r))
     sort = " · ".join(f"<b>{label}</b>" if order == o else f"<a href='/targets{'?o=' + o if o else ''}'>{label}</a>"
                       for o, label in (("", "회사 이름 순"), ("new", "최신순")))
     summary = " · ".join(f"{a} {count[a]}" for a in targets.ACTIONS if count.get(a)) or "아직 없음"
@@ -1660,7 +1671,7 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 <p class=why><a href='/' style='color:#8ab4f8'>← 판별 목록</a></p>
 <h2>목표가 표</h2>
 <p class=sort>정렬: {sort}</p>
-<p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · 판별 모델(Ollama)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
+<p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · stocknews_filter(종목 뉴스 필터)가 뽑은 것도 함께 보인다 · 판별 모델(Ollama)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
 같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
 {body or "<p>아직 뽑은 목표가가 없다.</p>"}"""
 
@@ -1897,6 +1908,9 @@ def main():
     threading.Thread(target=suggest_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=health_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=briefing_worker, args=(watcher,), daemon=True).start()
+    moved = move_targets_to_shared(watcher)
+    if moved:
+        log(f"🎯 목표가 기록 {moved}건을 공용 DB 로 옮김 ({targets_db.PATH})")
     threading.Thread(target=targets_worker, args=(watcher,), daemon=True).start()
     log(f"판별 목록: http://127.0.0.1:{cfg['port']}/")
     try:

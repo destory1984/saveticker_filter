@@ -2,7 +2,7 @@
 
 saveticker 뉴스는 시장 전체 뉴스라서 관찰 종목만이 아니라 모든 회사의 조치를 모은다.
 판별과 따로 묻는다: 제목에 목표가 낱말이 든 뉴스만 골라(CANDIDATE), 판별 모델에게
-회사·티커·증권사·구분·투자의견·목표가(이전 → 이후)를 뽑게 한다. 결과는 news_targets.jsonl 에 둔다.
+회사·티커·증권사·구분·투자의견·목표가(이전 → 이후)를 뽑게 한다. 결과는 stocknews_filter 와 함께 쓰는 공용 DB(targets_db)에 둔다.
 """
 import json
 import re
@@ -13,7 +13,8 @@ CANDIDATE = re.compile(
     r"outperform|underperform|overweight|underweight|목표가|목표주가|투자의견|커버리지|매수 의견|매수의견",
     re.I)
 
-ACTIONS = ("상향", "하향", "유지", "신규", "의견상향", "의견하향")
+# "제시" 는 목표가만 적혀 있고 올렸는지·내렸는지·처음인지 제목으로 알 수 없는 것 (stocknews_filter 와 같게)
+ACTIONS = ("상향", "하향", "유지", "신규", "의견상향", "의견하향", "제시")
 
 PROMPT = """아래 뉴스 제목에서 증권사·애널리스트의 목표가·투자의견 조치를 뽑아라.
 
@@ -26,6 +27,8 @@ PROMPT = """아래 뉴스 제목에서 증권사·애널리스트의 목표가·
 - action: 목표가를 올렸으면 "상향", 내렸으면 "하향", 목표가를 그대로 두거나 의견만 재확인하면 "유지",
   처음 분석을 시작하면 "신규", 목표가 변화 없이 의견만 올리면 "의견상향", 내리면 "의견하향".
   의견을 유지하면서 목표가를 올리면 "상향" 이다. 의견을 바꾸면서 목표가도 바꾸면 의견 쪽("의견상향"/"의견하향")이다.
+  "신규" 는 제목에 initiates, begins/starts coverage, 커버리지 개시, 신규 분석 같은 말이 있을 때만 쓴다.
+  목표가·의견만 있고 올렸는지·내렸는지·처음인지 제목으로 알 수 없으면 "제시".
 - rating: 바뀐 뒤의 투자의견을 한국어 짧은 말로. 제목에 없으면 "".
   Buy=매수, Overweight=비중확대, Outperform=아웃퍼폼, Neutral=중립, Hold=보유, Equal Weight=중립,
   Underperform=언더퍼폼, Underweight=비중축소, Sell=매도. 아웃퍼폼과 언더퍼폼을 헷갈리지 마라.
@@ -94,7 +97,11 @@ def parse(text: str, recs: list) -> dict:
 
 
 BROKER_ALIAS = {"jpmorganchase": "jpmorgan", "royalbankofcanada": "rbc", "bankofamerica": "bofa",
-                "뱅크오브아메리카": "bofa", "sanfordcbernstein": "bernstein", "citigroup": "citi"}
+                "뱅크오브아메리카": "bofa", "sanfordcbernstein": "bernstein", "citigroup": "citi",
+                "번스타인": "bernstein", "골드만삭스": "goldmansachs", "모건스탠리": "morganstanley",
+                "jp모건": "jpmorgan", "제이피모건": "jpmorgan", "씨티": "citi", "맥쿼리": "macquarie", "노무라": "nomura",
+                "제프리스": "jefferies", "바클레이즈": "barclays", "도이치": "deutsche", "도이체방크": "deutsche",
+                "도이치방크": "deutsche", "deutschebank": "deutsche"}
 
 
 def broker_key(name: str) -> str:
@@ -110,7 +117,10 @@ def broker_key(name: str) -> str:
 
 def stock_key(x: dict) -> str:
     """같은 회사: 티커가 있으면 티커, 없으면 이름."""
-    return x.get("ticker") or re.sub(r"\s", "", x["stock"].lower())
+    t = (x.get("ticker") or "").upper()
+    for suf in (".KS", ".KQ"):   # stocknews_filter 는 야후 티커(005930.KS)를 쓴다
+        t = t[:-len(suf)] if t.endswith(suf) else t
+    return t or re.sub(r"\s", "", x["stock"].lower())
 
 
 def group(rows: list, days: int = 2) -> list:
@@ -130,5 +140,6 @@ def group(rows: list, days: int = 2) -> list:
             out.append(dict(r, key=key, news=[r]))
     for g in out:
         acts = [x["action"] for x in g["news"]]
+        acts = [a for a in acts if a != "제시"] or acts   # 방향을 아는 기사가 하나라도 있으면 그쪽
         g["action"] = max(dict.fromkeys(acts), key=acts.count)
     return out
