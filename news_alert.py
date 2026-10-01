@@ -1427,7 +1427,7 @@ a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:0.93em}}
 </style>
 {FS_BAR}
-<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/briefing' target=_blank>장 전 브리핑</a><a href='/targets' target=_blank>목표가 표</a><a href='/stats' target=_blank>점수 성적표 · 관심사 제안</a></span></h2>
+<h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/briefing'>장 전 브리핑</a><a href='/targets'>목표가 표</a><a href='/stats'>점수 성적표 · 관심사 제안</a></span></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
 <div id=recent>{recent}</div>
 {note}<p class=why id=upd></p><table id=list>{''.join(rows)}</table>
@@ -1548,9 +1548,21 @@ def move_targets_to_shared(watcher: "Watcher") -> int:
     return n
 
 
+def ask_targets(cfg: dict, prompt: str) -> tuple:
+    """목표가 뽑기 물음: Ollama 먼저, 안 되면 Claude (10-01 전하 분부: Ollama 를 끈 동안에도 목표가 표가 채워지게).
+    (답, 답한 쪽). backend 가 "ollama" 면 Claude 로 넘기지 않는다."""
+    if cfg["backend"] in ("auto", "ollama"):
+        try:
+            return ask_ollama(cfg, prompt, cfg["ollama_timeout_sec"] if cfg["backend"] == "auto" else cfg["timeout_sec"]), "ollama"
+        except Exception:
+            if cfg["backend"] == "ollama":
+                raise
+    return ask_claude(cfg, prompt), "claude"
+
+
 def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
     """목표가 뉴스에서 회사·증권사·목표가를 뽑는다 (1분마다, 처음에는 쌓인 것을 채운다).
-    Ollama 로만 묻는다. 급하지 않아서, 꺼져 있으면 5분 뒤 다시 본다 (Claude 사용량을 아낀다)."""
+    Ollama 에 먼저 묻고, 꺼져 있으면 Claude 에 묻는다 (ask_targets). 둘 다 안 되면 5분 뒤 다시 본다."""
     tries, down = {}, False   # 모델이 답을 빠뜨린 횟수 (세 번이면 목표가 뉴스 아님으로 적는다), Ollama 꺼짐을 한 번만 적기
     while True:
         wait = 60
@@ -1560,8 +1572,8 @@ def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
                           key=lambda r: r.get("created_at", ""), reverse=True)[:size * most]
             for k in range(0, len(todo), size):
                 batch = todo[k:k + size]
-                got = targets.parse(ask_ollama(watcher.cfg, targets.build_prompt(batch), watcher.cfg["timeout_sec"]),
-                                    batch)
+                text, by = ask_targets(watcher.cfg, targets.build_prompt(batch))
+                got = targets.parse(text, batch)
                 for r in batch:
                     if r["id"] not in got:
                         tries[r["id"]] = tries.get(r["id"], 0) + 1
@@ -1569,7 +1581,7 @@ def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
                             continue
                     targets_db.save("saveticker", r, got.get(r["id"], []))
                 log(f"🎯 목표가 {sum(len(v) for v in got.values())}건 뽑음 "
-                    f"(뉴스 {len(batch)}건 중 {sum(1 for v in got.values() if v)}건이 목표가 뉴스)")
+                    f"(뉴스 {len(batch)}건 중 {sum(1 for v in got.values() if v)}건이 목표가 뉴스, {by})")
             down = False
         except requests.RequestException as e:
             if not down:
@@ -1664,7 +1676,7 @@ addEventListener("DOMContentLoaded", () => {
 
 
 def target_row(g: dict, stock: str = "") -> str:
-    """목표가 표 한 줄. stock 을 주면(최신순 보기) 회사 칸을 넣는다. 날짜는 월-일만 (10-01 전하 분부: 시각·요일 뺌)."""
+    """목표가 표 한 줄. stock 을 주면(최신순 보기) 회사 칸을 넣는다. 날짜는 월-일 시:분 (10-01 전하 분부: 요일은 뺌)."""
     k = g["at"].astimezone(KST)
     pt = money(g["pt_new"], g["currency"])
     if g["pt_old"] and g["pt_new"] and g["pt_old"] != g["pt_new"]:
@@ -1675,7 +1687,7 @@ def target_row(g: dict, stock: str = "") -> str:
                     for x in g["news"])
     news = (f"<details><summary>{len(g['news'])}곳</summary><ul>{links}</ul></details>" if len(g["news"]) > 1
             else f"<ul class=one>{links}</ul>")
-    return (f"<tr><td class=d>{k:%m-%d}</td>"
+    return (f"<tr><td class=d>{k:%m-%d %H:%M}</td>"
             + (f"<td class=sk>{stock}</td>" if stock else "")
             + f"<td class=br>{html.escape(g['broker'])}</td>"
             f"<td class=ac><b style='color:{TARGET_COLORS.get(g['action'], '#e6e6e6')}'>{g['action']}</b></td>"
@@ -1736,8 +1748,8 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 .sort a{{color:#8ab4f8}}
 html.nar body{{max-width:660px;margin:8px}} html.nar .card{{padding:6px 8px}}
 html.nar table.tg,html.nar table.tg tbody{{display:block}}
-html.nar table.tg tr{{display:grid;grid-template-columns:3.2em 9.5em 4.6em 1fr 4.6em;column-gap:8px;padding:5px 0;border-top:1px solid #2a2d33}}
-html.nar table.tg tr:has(td.sk){{grid-template-columns:3.2em 6.6em 9.5em 4.6em 1fr 4.6em}}
+html.nar table.tg tr{{display:grid;grid-template-columns:6.2em 9.5em 4.6em 1fr 4.6em;column-gap:8px;padding:5px 0;border-top:1px solid #2a2d33}}
+html.nar table.tg tr:has(td.sk){{grid-template-columns:6.2em 6.6em 9.5em 4.6em 1fr 4.6em}}
 html.nar table.tg td{{border:0;padding:0;min-width:0!important;white-space:normal}} html.nar table.tg td.d{{white-space:nowrap}}
 html.nar table.tg td.nw{{grid-column:1/-1;width:auto;padding:2px 0 0}} html.nar table.tg td.bl{{display:none}}
 #tgw,#cpy{{color:#8ab4f8;cursor:pointer;margin-left:10px}} #cpyn{{background:#2a2d33;color:#e6e6e6;border:1px solid #3a3f47;border-radius:4px;font:inherit}}
@@ -1757,7 +1769,7 @@ addEventListener("DOMContentLoaded",()=>{{
 <h2>목표가 표</h2>
 {COPY_IMG}
 <p class=sort>정렬: {sort} <a id=tgw></a> <a id=cpy>그림으로 복사</a> <select id=cpyn><option value=20>위 20줄<option value=40>위 40줄<option value=0>전체</select> <span id=cpymsg class=why></span></p>
-<p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · stocknews_filter(종목 뉴스 필터)가 뽑은 것도 함께 보인다 · 판별 모델(Ollama)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
+<p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · stocknews_filter(종목 뉴스 필터)가 뽑은 것도 함께 보인다 · 판별 모델(Ollama, 꺼져 있으면 Claude)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
 같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
 {body or "<p>아직 뽑은 목표가가 없다.</p>"}"""
 
@@ -1846,6 +1858,7 @@ def stats_page(watcher: Watcher) -> str:
         sug = "<p class=why>아직 만든 제안이 없습니다.</p>"
     every = watcher.cfg["suggest_days"]
     return f"""<!doctype html><meta charset=utf-8><title>점수 성적표</title>{SUB_CSS}
+<p class=why><a href='/' style='color:#8ab4f8'>← 판별 목록</a></p>
 <h2>점수 성적표 <small class=why>판별 {len(recs)}건 · 반응 {sum(1 for r in recs if fb.get(r['id']))}건 · 약 {span:.1f}일치 · 기준 {th}점</small></h2>
 <p class=why>👍·🔔10 은 "좋음", 👎·🔕0 은 "싫음"으로 셉니다. 움직임은 모두 뉴스 뒤 30분의 절댓값 평균입니다. 종목은 뉴스에 붙은 종목 가운데 가장 크게 움직인 것, 나스닥은 QQQ, 10년물은 미 국채 수익률(bp). 점수가 높을수록 시장이 더 움직였다면 판별이 맞게 가는 것입니다.</p>
 <h3>점수대별</h3>
@@ -1893,6 +1906,7 @@ def briefing_page(watcher: Watcher) -> str:
     else:
         body = "<p class=why>아직 만든 브리핑이 없습니다.</p>"
     return f"""<!doctype html><meta charset=utf-8><title>장 열기 전 브리핑</title>{SUB_CSS}
+<p class=why><a href='/' style='color:#8ab4f8'>← 판별 목록</a></p>
 <h2>장 열기 전 브리핑 <small class=why>평일 {html.escape(at)} (한국 시각) · 기준 {watcher.cfg['threshold']}점 이상 · 사건별로 묶음</small></h2>
 {body}
 <p><button id=go>지금 브리핑 만들기</button> <span class=why>말로 읽고 토스트도 띄웁니다</span></p>
