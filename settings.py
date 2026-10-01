@@ -28,6 +28,7 @@ FIELDS = {
     "tts": ("bool", None),
     "tts_voice": ("select", VOICES),
     "tts_rate": ("select", RATES),
+    "tts_volume": ("select", [(str(v), f"{v}%") for v in range(100, 20, -10)]),
     "tts_chime": ("select", None),
     "quiet_on": ("bool", None),
     "tts_quiet": ("quiet", None),
@@ -46,9 +47,9 @@ FIELDS = {
     "hide_max_score": ("select", [("-1", "숨기지 않음")] + [(str(i), f"{i}점 이하") for i in range(0, 6)]),
 }
 INT_KEYS = {"threshold", "max_age_min", "briefing_hours", "briefing_max", "summary_max", "wake_gap_min",
-            "suggest_days", "catchup_hours", "hide_max_score"}
+            "suggest_days", "catchup_hours", "hide_max_score", "tts_volume"}
 LABELS = {"toast": "윈도우 알림", "threshold": "기준 점수", "max_age_min": "알림 시한", "tts": "음성으로 읽기",
-          "tts_voice": "목소리", "tts_rate": "빠르기", "tts_chime": "말머리 소리", "quiet_on": "조용한 시각",
+          "tts_voice": "목소리", "tts_rate": "빠르기", "tts_volume": "목소리 크기", "tts_chime": "말머리 소리", "quiet_on": "조용한 시각",
           "tts_quiet": "조용한 시각", "briefing_on": "장 전 브리핑", "briefing_at": "브리핑 시각",
           "briefing_hours": "브리핑 기간", "briefing_max": "브리핑 사건 수", "summary_max": "깨어난 뒤 요약",
           "wake_gap_min": "잠든 것으로 보는 시간", "suggest_days": "관심사 제안", "suggest_backend": "제안 LLM",
@@ -142,6 +143,7 @@ def menu(cfg: dict) -> str:
   {row(cfg, "tts", "말머리 소리 뒤에 제목을 줄인 말을 읽는다", "제목을 12자 안팎으로 줄인 말을 Edge 음성으로 읽는다 (예: 이란 휴전안 거부). 인터넷이 안 되면 윈도우 기본 음성으로 읽는다. 켜 두면 토스트 소리는 끈다.")}
   {row(cfg, "tts_voice", "종목 뉴스 필터는 선희 (여)")}
   {row(cfg, "tts_rate")}
+  {row(cfg, "tts_volume", "말머리 소리는 그대로")}
   {row(cfg, "tts_chime", "종목 뉴스 필터는 Windows Notify Email")}
   {row(cfg, "quiet_on", "이 PC 시각. 23:00~07:00 처럼 자정을 넘어도 된다", "이 시간에는 말하지 않는다. 토스트는 그대로 뜬다.")}
   <div class="mrow qtimes"><input type=time id=qfrom value="{qfrom}" aria-label="조용한 시각 시작"> ~ <input type=time id=qto value="{qto}" aria-label="조용한 시각 끝"></div>
@@ -251,7 +253,7 @@ JS = r"""
   const isOn = key => menu.querySelector(`.switch[data-key="${key}"]`).getAttribute("aria-checked") === "true";
   function dim() {   // 꺼 둔 기능의 딸린 칸은 흐리게
     $("#qfrom").disabled = $("#qto").disabled = !isOn("quiet_on");
-    ["tts_voice", "tts_rate", "tts_chime"].forEach(k => menu.querySelector(`[data-key="${k}"]`).disabled = !isOn("tts"));
+    ["tts_voice", "tts_rate", "tts_volume", "tts_chime"].forEach(k => menu.querySelector(`[data-key="${k}"]`).disabled = !isOn("tts"));
     $("#brat").disabled = !isOn("briefing_on");
     ["briefing_hours", "briefing_max"].forEach(k => menu.querySelector(`[data-key="${k}"]`).disabled = !isOn("briefing_on"));
   }

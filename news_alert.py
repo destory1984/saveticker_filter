@@ -83,6 +83,7 @@ DEFAULTS = {
     "toast": True,                 # 윈도우 토스트. 끄면 목록에만 쌓인다 (브리핑·요약·수집 멈춤 토스트도 꺼진다)
     "tts_voice": "ko-KR-InJoonNeural",  # Edge 읽어주기 음성. 안 되면 윈도우 기본 음성(SAPI). 종목 뉴스 필터(선희)와 다른 목소리
     "tts_rate": "+0%",
+    "tts_volume": 100,             # 목소리 크기(%). 말머리 소리는 그대로다
     "tts_chime": r"C:\Windows\Media\Windows Notify Messaging.wav",   # RSI 알림(Speech On)과 다른 소리
     "quiet_on": False,             # 조용한 시각을 쓴다
     "tts_quiet": "23:00-07:00",    # 말하지 않을 시간대 (토스트는 그대로). 옛 형식 "23-07" 도 읽는다
@@ -397,14 +398,23 @@ def play_file(path: str):
         _mci("close newsalert")
 
 
+def tts_volume(cfg: dict) -> int:
+    """목소리 크기 10 → 100 (%). 엉뚱한 값이면 100."""
+    try:
+        return max(10, min(100, int(cfg.get("tts_volume", 100))))
+    except (TypeError, ValueError):
+        return 100
+
+
 def _speak_edge(cfg: dict, text: str):
     import asyncio
     import edge_tts
     fd, tmp = tempfile.mkstemp(prefix="news_tts_", suffix=".mp3")
     os.close(fd)
+    volume = f"{tts_volume(cfg) - 100:+d}%"
     try:
         asyncio.run(asyncio.wait_for(
-            edge_tts.Communicate(text, cfg["tts_voice"], rate=cfg["tts_rate"]).save(tmp), 15))
+            edge_tts.Communicate(text, cfg["tts_voice"], rate=cfg["tts_rate"], volume=volume).save(tmp), 15))
         play_file(tmp)
     finally:
         try:
@@ -413,12 +423,14 @@ def _speak_edge(cfg: dict, text: str):
             pass
 
 
-def _speak_sapi(text: str):
+def _speak_sapi(text: str, volume: int = 100):
     import pythoncom
     import win32com.client
     pythoncom.CoInitialize()
     try:
-        win32com.client.Dispatch("SAPI.SpVoice").Speak(text)
+        voice = win32com.client.Dispatch("SAPI.SpVoice")
+        voice.Volume = volume
+        voice.Speak(text)
     finally:
         pythoncom.CoUninitialize()
 
@@ -437,7 +449,7 @@ def speak(cfg: dict, text: str) -> str:
     except Exception as e:
         log(f"edge 음성 실패 → SAPI: {type(e).__name__}: {str(e)[:100]}")
     try:
-        _speak_sapi(text)
+        _speak_sapi(text, tts_volume(cfg))
         return "sapi"
     except Exception as e:
         log(f"SAPI 도 실패: {type(e).__name__}: {e}")
