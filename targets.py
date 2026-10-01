@@ -126,7 +126,7 @@ def broker_key(name: str) -> str:
     """같은 증권사의 이름 갈래를 합친다: "JPMorgan" / "J.P. Morgan" / "JPMorgan Chase & Co.", "BofA" / "뱅크오브아메리카"."""
     s = re.sub(r"[^\w]", "", (name or "").lower())
     while True:
-        t = re.sub(r"(securities|capital|markets|group|co|inc|llc|투자증권|증권|證)$", "", s)
+        t = re.sub(r"(securities|capital|markets|group|co|inc|llc|투자증권|투자證|증권|證)$", "", s)
         if t == s or not t:
             break
         s = t
