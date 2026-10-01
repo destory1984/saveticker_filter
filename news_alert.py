@@ -1659,7 +1659,7 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
     sort = " · ".join(f"<b>{label}</b>" if order == o else f"<a href='/targets{'?o=' + o if o else ''}'>{label}</a>"
                       for o, label in (("", "최신순"), ("name", "회사 이름 순")))
     summary = " · ".join(f"{a} {count[a]}" for a in targets.ACTIONS if count.get(a)) or "아직 없음"
-    return f"""<!doctype html><meta charset=utf-8><title>목표가 표</title>{SUB_CSS}
+    return f"""<!doctype html><meta charset=utf-8><title>목표가 표</title><meta name=viewport content='width=device-width,initial-scale=1'>{SUB_CSS}
 <style>
 .card{{background:#1d2127;border-radius:8px;padding:8px 12px;margin:8px 0}} table.tg{{width:100%;margin:4px 0}}
 table.tg td{{padding:3px 8px 3px 0}} td.sk{{white-space:nowrap;font-weight:600;min-width:8em}}
@@ -1668,6 +1668,11 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 .pct{{color:#8a9099}} ul{{margin:0;padding-left:18px}} ul.one{{list-style:none;padding:0}} summary{{cursor:pointer;color:#8ab4f8}}
 .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}}
 .sort a{{color:#8ab4f8}}
+@media (max-width:700px){{
+body{{margin:8px}} .card{{padding:6px 8px}} table.tg,table.tg tbody,table.tg tr{{display:block}} table.tg tr{{padding:5px 0;border-top:1px solid #2a2d33}}
+table.tg td{{display:inline-block;border:0;padding:0 6px 0 0;min-width:0!important}} table.tg td.pt{{white-space:normal}} table.tg td.nw{{display:block;width:auto;padding:2px 0 0}}
+table.tg td.bl:empty,table.tg td.rt:empty{{display:none}}
+}}
 </style>
 <p class=why><a href='/' style='color:#8ab4f8'>← 판별 목록</a></p>
 <h2>목표가 표</h2>
