@@ -169,13 +169,14 @@ def menu(cfg: dict) -> str:
 
 BUTTON = "<button type=button class='hbtn setbtn' id=setbtn aria-expanded=false>⚙ 설정</button>"
 
-# 판별 목록의 글자 크기 단추(FS_BAR, 오른쪽 위에 고정) 왼쪽에 ⚙ 설정 단추를 둔다
+# 판별 목록 오른쪽 위: 글자 크기 단추(FS_BAR) 다음에 ⚙ 설정 단추 (종목 뉴스 필터와 같은 순서). 이 페이지에서만 글자 크기 단추를 왼쪽으로 민다
 CSS = """
 :root{--bg:#16181c;--panel:#1c1f24;--line:#2e333b;--text:#e6e6e6;--muted:#8a9099;--pos:#3cc47c;--neg:#f0605a;--down:#5b8ff0;--sel:#23272e;--input:#16181c}
 h2{padding-right:200px}
 .hbtn{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:99px;padding:2px 9px;cursor:pointer;white-space:nowrap}
 .hbtn:hover{background:var(--sel)} .hbtn:disabled{opacity:.4;cursor:default}
-.setbtn{position:fixed;top:10px;right:104px;z-index:5;font-size:14px}
+.setbtn{position:fixed;top:10px;right:16px;z-index:5;font-size:14px}
+.fszbar{right:94px}
 .menu{position:fixed;z-index:10;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 4px;box-shadow:0 4px 16px rgba(0,0,0,.4);display:grid;width:min(max(480px,calc(var(--fs) * 34)),calc(100vw - 16px));max-height:calc(100vh - 70px);overflow-y:auto;overflow-x:hidden}
 .menu[hidden],.menu [hidden]{display:none!important}
 .menu .sub{color:var(--muted);font-size:.9em}
