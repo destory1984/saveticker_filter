@@ -1624,7 +1624,7 @@ def target_row(g: dict, stock: str = "") -> str:
 
 def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
     """목표가 표: 최근 days 일, 모든 회사. 같은 조치를 여러 곳이 쓰면 한 줄 (targets.group).
-    order "" 는 회사마다 칸을 나눠 이름 순, "new" 는 모든 회사를 한 표에 최신순. 관찰 종목은 ★."""
+    order "" 는 모든 회사를 한 표에 최신순, "name" 은 회사마다 칸을 나눠 이름 순 (09-30 전하 분부로 최신순이 기본). 관찰 종목은 ★."""
     # 공용 DB: 이쪽과 stocknews_filter 가 뽑은 것을 함께 보인다 (같은 조치는 티커로 한 줄에 합쳐진다)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = [dict(r, at=parse_ts(r["created_at"]), title=r["title_ko"] or r["title"])
@@ -1646,7 +1646,7 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
     for gs in groups.values():
         for g in gs:
             count[g["action"]] = count.get(g["action"], 0) + 1
-    if order == "new":
+    if order != "name":
         flat = sorted(((g, title(gs)) for gs in groups.values() for g in gs), key=lambda x: x[0]["at"], reverse=True)
         body = f"<table class=tg>{''.join(target_row(g, t) for g, t in flat)}</table>" if flat else ""
     else:
@@ -1655,8 +1655,9 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
                        for gs in sorted(groups.values(), key=lambda gs: gs[0]["stock"].lower()))
     done = read_targets()
     todo = sum(1 for r in list(watcher.judged.values()) if r["id"] not in done and targets.is_candidate(r))
+    order = "name" if order == "name" else ""
     sort = " · ".join(f"<b>{label}</b>" if order == o else f"<a href='/targets{'?o=' + o if o else ''}'>{label}</a>"
-                      for o, label in (("", "회사 이름 순"), ("new", "최신순")))
+                      for o, label in (("", "최신순"), ("name", "회사 이름 순")))
     summary = " · ".join(f"{a} {count[a]}" for a in targets.ACTIONS if count.get(a)) or "아직 없음"
     return f"""<!doctype html><meta charset=utf-8><title>목표가 표</title>{SUB_CSS}
 <style>
