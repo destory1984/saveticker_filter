@@ -1675,10 +1675,10 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 .sort a{{color:#8ab4f8}}
 html.nar body{{max-width:660px;margin:8px}} html.nar .card{{padding:6px 8px}}
 html.nar table.tg,html.nar table.tg tbody{{display:block}}
-html.nar table.tg tr{{display:grid;grid-template-columns:3.2em 9.5em 4.6em 1fr 4.6em 1.4em;column-gap:8px;padding:5px 0;border-top:1px solid #2a2d33}}
-html.nar table.tg tr:has(td.sk){{grid-template-columns:3.2em 6.6em 9.5em 4.6em 1fr 4.6em 1.4em}}
+html.nar table.tg tr{{display:grid;grid-template-columns:3.2em 9.5em 4.6em 1fr 4.6em;column-gap:8px;padding:5px 0;border-top:1px solid #2a2d33}}
+html.nar table.tg tr:has(td.sk){{grid-template-columns:3.2em 6.6em 9.5em 4.6em 1fr 4.6em}}
 html.nar table.tg td{{border:0;padding:0;min-width:0!important;white-space:normal}} html.nar table.tg td.d{{white-space:nowrap}}
-html.nar table.tg td.nw{{grid-column:1/-1;width:auto;padding:2px 0 0}}
+html.nar table.tg td.nw{{grid-column:1/-1;width:auto;padding:2px 0 0}} html.nar table.tg td.bl{{display:none}}
 #tgw{{color:#8ab4f8;cursor:pointer;margin-left:10px}}
 </style>
 <script>
