@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
+import settings
 import targets
 import targets_db
 
@@ -79,15 +80,18 @@ DEFAULTS = {
     "dup_ratio": 0.6,              # 최근 알린 제목과 이만큼 비슷하면 알리지 않는다
     "hide_max_score": 3,           # 판별 목록에서 이 점수 이하는 기본으로 숨긴다 (👍·🔔10 준 것은 보인다)
     "tts": True,                   # 알림을 말로도 읽는다: 말머리 소리 → 제목을 줄인 말 ("이란 휴전안 거부")
-    "tts_voice": "ko-KR-SunHiNeural",   # Edge 읽어주기 음성. 안 되면 윈도우 기본 음성(SAPI)
+    "toast": True,                 # 윈도우 토스트. 끄면 목록에만 쌓인다 (브리핑·요약·수집 멈춤 토스트도 꺼진다)
+    "tts_voice": "ko-KR-InJoonNeural",  # Edge 읽어주기 음성. 안 되면 윈도우 기본 음성(SAPI). 종목 뉴스 필터(선희)와 다른 목소리
     "tts_rate": "+0%",
     "tts_chime": r"C:\Windows\Media\Windows Notify Messaging.wav",   # RSI 알림(Speech On)과 다른 소리
-    "tts_quiet": "",               # 말하지 않을 시간대, 예: "23-07". 비우면 늘 말한다 (토스트는 그대로)
+    "quiet_on": False,             # 조용한 시각을 쓴다
+    "tts_quiet": "23:00-07:00",    # 말하지 않을 시간대 (토스트는 그대로). 옛 형식 "23-07" 도 읽는다
     "wake_gap_min": 10,            # 감시 주기가 이만큼 끊겼으면 PC 가 잠들었다 깬 것으로 보고, 밀린 판별이 끝나면 요약을 알린다
     "summary_max": 5,              # 요약에서 읽어 줄 뉴스 수
     "moves": True,                 # 뉴스 뒤 5분·30분 시세 움직임을 적는다 (yfinance, 공개 시세). 시장은 모든 뉴스, 종목은 기준 점수 이상만
     "suggest_days": 7,             # 관심사 고침 제안을 이 날짜마다 한 번 만든다. 0 이면 버튼으로만
-    "briefing_at": "21:00",        # 평일 이 시각(한국)에 장 열기 전 브리핑. 비우면 안 한다
+    "briefing_on": True,           # 장 열기 전 브리핑을 한다
+    "briefing_at": "21:00",        # 평일 이 시각(한국)에 장 열기 전 브리핑
     "briefing_hours": 12,          # 브리핑에 담을 기간
     "briefing_max": 5,             # 브리핑에서 읽어 줄 사건 수
     "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
@@ -135,7 +139,15 @@ JSON 만 출력하라. 다른 말은 쓰지 마라.
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     if CONFIG.exists():
-        cfg.update(json.loads(CONFIG.read_text(encoding="utf-8")))
+        saved = json.loads(CONFIG.read_text(encoding="utf-8"))
+        cfg.update(saved)
+        # 설정 창(10-01)이 생기기 전 파일: 켜고 끄는 칸이 따로 없었고, 비워 두면 끈 것이었다
+        if "quiet_on" not in saved:
+            cfg["quiet_on"] = bool(saved.get("tts_quiet"))
+        if "briefing_on" not in saved:
+            cfg["briefing_on"] = bool(saved.get("briefing_at", "21:00"))
+        for k in ("tts_quiet", "briefing_at"):
+            cfg[k] = cfg[k] or DEFAULTS[k]
     else:
         CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
     return cfg
@@ -431,12 +443,17 @@ def speak(cfg: dict, text: str) -> str:
 
 
 def quiet_now(cfg: dict) -> bool:
-    """tts_quiet("23-07") 시간대 안인가."""
-    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", cfg.get("tts_quiet") or "")
+    """조용한 시각("23:00-07:00") 안인가. 옛 형식 "23-07" 도 읽는다."""
+    if not cfg.get("quiet_on"):
+        return False
+    m = re.fullmatch(r"\s*(\d{1,2})(?::(\d\d))?\s*-\s*(\d{1,2})(?::(\d\d))?\s*", cfg.get("tts_quiet") or "")
     if not m:
         return False
-    a, b, h = int(m[1]), int(m[2]), datetime.now().hour
-    return a <= h < b if a <= b else h >= a or h < b
+    a = int(m[1]) * 60 + int(m[2] or 0)
+    b = int(m[3]) * 60 + int(m[4] or 0)
+    now = datetime.now()
+    t = now.hour * 60 + now.minute
+    return a <= t < b if a <= b else t >= a or t < b
 
 
 _speech = queue.Queue()
@@ -459,6 +476,8 @@ def say_alert(cfg: dict, text: str):
 
 
 def toast(cfg: dict, r: dict, score: int, reason: str):
+    if not cfg.get("toast", True):
+        return
     try:
         from winotify import Notification, audio
     except ImportError:
@@ -687,12 +706,10 @@ def read_suggestion() -> dict:
 
 def suggest_worker(watcher: "Watcher"):
     """suggest_days 마다 한 번 제안을 만들고 토스트로 알린다."""
-    days = watcher.cfg["suggest_days"]
-    if not days:
-        return
     while True:
+        days = watcher.cfg["suggest_days"]   # 설정 창에서 바꾸면 한 시간 안에 듣는다
         last = read_suggestion().get("at", "")
-        if last < (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds"):
+        if days and last < (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds"):
             try:
                 s = make_suggestion(watcher)
                 if s["add"] or s["remove"]:
@@ -733,6 +750,8 @@ def topic_records(watcher: "Watcher", topic: str) -> list:
 
 
 def plain_toast(cfg: dict, title: str, msg: str, path: str = "/", silent: bool = False):
+    if not cfg.get("toast", True):
+        return
     try:
         from winotify import Notification, audio
     except ImportError:
@@ -845,13 +864,13 @@ def read_briefing() -> dict:
 
 def briefing_worker(watcher: "Watcher"):
     """평일 briefing_at 에 한 번. PC 가 그때 잠들어 있었으면 깬 뒤 2시간 안에는 한다."""
-    at = watcher.cfg.get("briefing_at") or ""
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", at.strip())
-    if not m:
-        return
     while True:
         time.sleep(30)
         try:
+            # 설정 창에서 바꾸면 바로 듣게 돌 때마다 다시 읽는다
+            m = re.fullmatch(r"(\d{1,2}):(\d{2})", (watcher.cfg.get("briefing_at") or "").strip())
+            if not m or not watcher.cfg.get("briefing_on", True):
+                continue
             now = datetime.now(KST)
             start = now.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
             if (now.weekday() < 5 and start <= now < start + timedelta(hours=2)
@@ -862,6 +881,8 @@ def briefing_worker(watcher: "Watcher"):
 
 
 def summary_toast(cfg: dict, n: int, top: list):
+    if not cfg.get("toast", True):
+        return
     try:
         from winotify import Notification, audio
     except ImportError:
@@ -1166,6 +1187,14 @@ def make_handler(watcher: Watcher):
             # 다른 사이트가 몰래 보내지 못하게 사용자 정의 헤더를 요구한다 (브라우저가 막는다).
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if self.headers.get("X-Settings") == "yes" and u.path in SETTING_ROUTES:
+                # ⚙ 설정 창. 본문은 JSON
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                    self.send_json(SETTING_ROUTES[u.path](watcher, body if isinstance(body, dict) else {}))
+                except ValueError as e:
+                    self.send_json({"ok": False, "msg": str(e)[:200]})
+                return
             if u.path == "/briefing" and self.headers.get("X-Page") == "yes":
                 # 브리핑을 지금 만든다 (말하고 토스트도 띄운다)
                 self.send_json(deliver_briefing(watcher))
@@ -1181,6 +1210,29 @@ def make_handler(watcher: Watcher):
                 return
             self.send_json({"moved": reset_records(watcher, q["what"])})
     return H
+
+
+def set_setting(watcher: Watcher, body: dict) -> dict:
+    """⚙ 설정 창에서 값 하나를 바꾼다. 돌고 있는 판별기에 바로 반영하고 설정 파일에 쓴다."""
+    key = body.get("key", "")
+    before, after = settings.apply(watcher.cfg, key, body.get("value"))
+    settings.save(watcher.cfg, CONFIG)
+    if before != after:
+        log(f"설정: {key} {before!r} → {after!r}")
+    return {"ok": True, "label": settings.LABELS.get(key, key)}
+
+
+def say_test(watcher: Watcher, body: dict) -> dict:
+    text = str(body.get("text") or "").strip()[:60] or "이란 휴전안 거부"
+    by = []
+    # 음성을 꺼 두었어도 들어 볼 수 있게 대기열을 거치지 않고 바로 읽는다
+    t = threading.Thread(target=lambda: by.append(speak(watcher.cfg, text)), daemon=True)
+    t.start()
+    t.join(1.5)   # 첫 소리가 날 때까지는 기다리지 않는다. 실패는 로그로
+    return {"ok": True, "by": {"edge": "Edge 음성", "sapi": "윈도우 기본 음성"}.get(by[0], "") if by else ""}
+
+
+SETTING_ROUTES = {"/settings": set_setting, "/say": say_test}
 
 
 def reset_records(watcher: Watcher, what: str) -> list:
@@ -1427,6 +1479,10 @@ a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .
 #recent{{margin:8px 0 12px;padding:8px 10px;border-radius:8px;background:#1d2a45;line-height:1.8}} #recent a{{margin-right:2px}} #recent a:hover{{text-decoration:underline}} .nav a{{color:#8ab4f8;text-decoration:underline;margin-left:10px;font-size:0.93em}}
 </style>
 {FS_BAR}
+<style>{settings.CSS}</style>
+{settings.BUTTON}
+{settings.menu(watcher.cfg)}
+<script>{settings.JS}</script>
 <h2>saveticker 필터링 <small style="color:#8a9099">기준 {watcher.cfg['threshold']}점 · 파란 줄은 알림을 보낸 뉴스 · 점수 밑 🦙 Ollama / <span style="color:#d97757">✴</span> Claude 가 판별</small><span class=nav><a href='/briefing'>장 전 브리핑</a><a href='/targets'>목표가 표</a><a href='/stats'>점수 성적표 · 관심사 제안</a></span></h2>
 <p class=warn>※ 이 PC 의 Edge 에 <a href="https://saveticker.com/news" target=_blank>saveticker.com/news</a> 탭이 떠 있고 확장의 실시간 감시가 켜져 있어야 새 뉴스가 들어옵니다.</p>
 <div id=recent>{recent}</div>
@@ -1889,7 +1945,7 @@ document.getElementById("go").onclick = async (e) => {{
 def briefing_page(watcher: Watcher) -> str:
     """마지막 장 열기 전 브리핑. 사건마다 타임라인으로 잇는다."""
     b = read_briefing()
-    at = watcher.cfg.get("briefing_at") or "(끔)"
+    at = watcher.cfg.get("briefing_at") if watcher.cfg.get("briefing_on", True) else "(끔)"
     if b:
         rows = []
         for x in b["items"]:

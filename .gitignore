@@ -14,3 +14,5 @@ CLAUDE.md
 NOTES.md
 briefing.json
 news_targets.jsonl
+# 설정은 이 PC 것이다. 처음 켤 때 DEFAULTS 로 만들어지고 ⚙ 설정 창이 고쳐 쓴다
+news_alert_config.json

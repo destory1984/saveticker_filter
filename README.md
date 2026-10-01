@@ -44,7 +44,8 @@ Edge 확장 (extension/)          news_alert.py
 | `targets.py` | 목표가 뉴스 고르기, 회사·증권사·목표가 뽑기 프롬프트, 같은 조치 합치기 (`/targets` 목표가 표) |
 | `targets_db.py` | stocknews_filter 와 함께 쓰는 목표가 공용 DB |
 | `interests.md` | 판별 기준이 되는 관심사. 고치면 다음 판별부터 반영된다 |
-| `news_alert_config.json` | 모델, 기준 점수, 포트 등 설정 |
+| `settings.py` | ⚙ 설정 창 (판별 목록 오른쪽 위) |
+| `news_alert_config.json` | 설정. 저장소에는 없고, 처음 켤 때 기본값으로 만들어진다. 설정 창이 고쳐 쓴다 |
 | `news_alert_bg.vbs` / `news_alert_stop.bat` | 창 없이 백그라운드 실행 / 종료 |
 
 ## 설치
@@ -163,6 +164,16 @@ Edge 확장 (extension/)          news_alert.py
 - **`interests.md` 는 고치지 않는다.** 고칠지는 직접 정한다. 제안은 `interests_suggest.json`.
 
 ![점수 성적표와 관심사 고침 제안](docs/screenshot_stats.png)
+
+### 설정 창 (⚙ 설정)
+
+판별 목록 오른쪽 위 "⚙ 설정" 을 누르면 펼쳐진다. 바꾸면 바로 적용되고 `news_alert_config.json` 에 쓴다. 다시 띄울 필요가 없다.
+
+- **알림**: 윈도우 알림 켜고 끄기, 기준 점수(5 → 10점), 알림 시한(30 → 360분).
+- **소리**: 음성으로 읽기, 목소리(인준·선희·현수), 빠르기, 말머리 소리, 조용한 시각(예: 23:00 → 07:00), 읽기 시험 단추.
+- **브리핑 · 요약**: 장 전 브리핑 켜고 끄기와 시각, 담을 기간과 사건 수, 깨어난 뒤 요약에서 읽을 수, 잠든 것으로 보는 시간, 밀린 뉴스를 거슬러 판별할 시간.
+- **판별**: 판별 LLM(Ollama 먼저 / Ollama 만 / Claude 만), Claude 모델, Ollama 모델, 관심사 제안 주기와 제안 LLM, 목록에서 숨길 점수.
+- 포트, 시세 움직임 적기처럼 다시 띄워야 듣는 것은 창에 넣지 않았다. 설정 파일을 직접 고친다.
 
 ### 목표가 표 (`/targets`)
 
