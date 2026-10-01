@@ -1668,7 +1668,7 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 .pct{{color:#8a9099}} ul{{margin:0;padding-left:18px}} ul.one{{list-style:none;padding:0}} summary{{cursor:pointer;color:#8ab4f8}}
 .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}}
 .sort a{{color:#8ab4f8}}
-html.nar body{{max-width:440px;margin:8px}} html.nar .card{{padding:6px 8px}}
+html.nar body{{max-width:660px;margin:8px}} html.nar .card{{padding:6px 8px}}
 html.nar table.tg,html.nar table.tg tbody,html.nar table.tg tr{{display:block}} html.nar table.tg tr{{padding:5px 0;border-top:1px solid #2a2d33}}
 html.nar table.tg td{{display:inline-block;border:0;padding:0 6px 0 0;min-width:0!important}} html.nar table.tg td.pt{{white-space:normal}}
 html.nar table.tg td.nw{{display:block;width:auto;padding:2px 0 0}} html.nar table.tg td.bl:empty,html.nar table.tg td.rt:empty{{display:none}}
