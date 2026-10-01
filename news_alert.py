@@ -1603,7 +1603,7 @@ TARGET_COLORS = {"상향": "#e06c6c", "의견상향": "#e06c6c", "하향": "#6c9
 
 
 def target_row(g: dict, stock: str = "") -> str:
-    """목표가 표 한 줄. stock 을 주면(최신순 보기) 날짜에 시각을 붙이고 회사 칸을 넣는다."""
+    """목표가 표 한 줄. stock 을 주면(최신순 보기) 회사 칸을 넣는다. 날짜는 월-일만 (10-01 전하 분부: 시각·요일 뺌)."""
     k = g["at"].astimezone(KST)
     pt = money(g["pt_new"], g["currency"])
     if g["pt_old"] and g["pt_new"] and g["pt_old"] != g["pt_new"]:
@@ -1614,7 +1614,7 @@ def target_row(g: dict, stock: str = "") -> str:
                     for x in g["news"])
     news = (f"<details><summary>{len(g['news'])}곳</summary><ul>{links}</ul></details>" if len(g["news"]) > 1
             else f"<ul class=one>{links}</ul>")
-    return (f"<tr><td class=d>{k:%m-%d}({'월화수목금토일'[k.weekday()]}){f' {k:%H:%M}' if stock else ''}</td>"
+    return (f"<tr><td class=d>{k:%m-%d}</td>"
             + (f"<td class=sk>{stock}</td>" if stock else "")
             + f"<td class=br>{html.escape(g['broker'])}</td>"
             f"<td class=ac><b style='color:{TARGET_COLORS.get(g['action'], '#e6e6e6')}'>{g['action']}</b></td>"
@@ -1642,12 +1642,17 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
         star = "★ " if tk in watched or name in watched else ""
         return f"{star}{html.escape(name)}" + (f" <span class=why>{html.escape(tk)}</span>" if tk and tk != name else "")
 
+    def short(gs):   # 최신순 표의 회사 칸은 티커로 (10-01 전하 분부). 한국 종목(숫자 티커)과 티커 없는 회사는 이름
+        name, tk = gs[0]["stock"], next((g["ticker"] for g in gs if g["ticker"]), "")
+        star = "★ " if tk in watched or name in watched else ""
+        return star + html.escape(tk if tk and not tk[0].isdigit() else name)
+
     count = {}
     for gs in groups.values():
         for g in gs:
             count[g["action"]] = count.get(g["action"], 0) + 1
     if order != "name":
-        flat = sorted(((g, title(gs)) for gs in groups.values() for g in gs), key=lambda x: x[0]["at"], reverse=True)
+        flat = sorted(((g, short(gs)) for gs in groups.values() for g in gs), key=lambda x: x[0]["at"], reverse=True)
         body = f"<table class=tg>{''.join(target_row(g, t) for g, t in flat)}</table>" if flat else ""
     else:
         body = "".join(f"<div class=card><div><b>{title(gs)}</b> <span class=why>· {len(gs)}건</span></div>"
@@ -1669,9 +1674,11 @@ td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{m
 .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}}
 .sort a{{color:#8ab4f8}}
 html.nar body{{max-width:660px;margin:8px}} html.nar .card{{padding:6px 8px}}
-html.nar table.tg,html.nar table.tg tbody,html.nar table.tg tr{{display:block}} html.nar table.tg tr{{padding:5px 0;border-top:1px solid #2a2d33}}
-html.nar table.tg td{{display:inline-block;border:0;padding:0 6px 0 0;min-width:0!important}} html.nar table.tg td.pt{{white-space:normal}}
-html.nar table.tg td.nw{{display:block;width:auto;padding:2px 0 0}} html.nar table.tg td.bl:empty,html.nar table.tg td.rt:empty{{display:none}}
+html.nar table.tg,html.nar table.tg tbody{{display:block}}
+html.nar table.tg tr{{display:grid;grid-template-columns:3.2em 9.5em 4.6em 1fr 4.6em 1.4em;column-gap:8px;padding:5px 0;border-top:1px solid #2a2d33}}
+html.nar table.tg tr:has(td.sk){{grid-template-columns:3.2em 6.6em 9.5em 4.6em 1fr 4.6em 1.4em}}
+html.nar table.tg td{{border:0;padding:0;min-width:0!important;white-space:normal}} html.nar table.tg td.d{{white-space:nowrap}}
+html.nar table.tg td.nw{{grid-column:1/-1;width:auto;padding:2px 0 0}}
 #tgw{{color:#8ab4f8;cursor:pointer;margin-left:10px}}
 </style>
 <script>
