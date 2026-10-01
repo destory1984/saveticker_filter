@@ -124,6 +124,8 @@ reason 과 con 은 점수와 상관없이 둘 다 쓴다. 점수가 높으면 re
 - 같은 사건이란 그 기사 제목과 같은 일을 다루는 것이다. 같은 나라·인물이 나와도 다른 일이면 새 이름을 지어라.
   예: 최근 사건이 "이란 항공편 금지 — 이란 항공사 운항 금지 …" 일 때, "트럼프, 이란의 제안 거부" 는 다른 일이다.
 - 이름만 쓰고, 이름 뒤의 " — 기사 제목" 은 topic 에 넣지 마라.
+- 한 제목에 두 가지 일이 함께 나오면 더 큰 일 하나로 이름을 짓는다. 서로 다른 일의 낱말을 이어 붙이지 마라.
+  예: "마이크론에 힘입어 기술주 상승, 그러나 미 국채 투매가 시장을 짓누르다" → "마이크론 국채 투매" (X), "미 국채 투매" (O).
 
 [최근 사건] (이름 — 그 사건의 최근 기사 제목)
 {topics}
@@ -745,7 +747,7 @@ def topic_records(watcher: "Watcher", topic: str) -> list:
     """이 사건 이름을 단 뉴스, 오래된 것부터 (최근 3일)."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=3)
     recs = [r for r in watcher.judged.values()
-            if r.get("topic") == topic and (parse_ts(r.get("created_at", "")) or cutoff) >= cutoff]
+            if same_topic(r.get("topic") or "", topic) and (parse_ts(r.get("created_at", "")) or cutoff) >= cutoff]
     return sorted(recs, key=lambda r: r.get("created_at", ""))
 
 
@@ -811,6 +813,22 @@ def health_worker(watcher: "Watcher"):
 # 장 열기 전 브리핑
 # ─────────────────────────────────────────────────────────────
 
+def same_topic(a: str, b: str) -> bool:
+    """사건 이름 둘이 같은 사건인가. 모델은 같은 일에 "골드만 연준 전망" / "골드만삭스 연준 전망",
+    "트럼프 시진핑 회담" / "트럼프-시진핑 회담", "엔비디아 자사주" / "엔비디아 자사주 매입" 처럼 이름을 조금 달리 붙인다 (10-01).
+    짧은 쪽의 낱말이 모두 긴 쪽에 있으면(앞머리만 같아도) 같은 사건으로 본다. 낱말 하나짜리 이름은 묶지 않는다.
+    "연준 카시카리 발언" 과 "연준 월러 발언" 은 낱말 하나가 달라 따로다."""
+    if a == b:
+        return bool(a)
+    wa, wb = ([w for w in re.split(r"[\s·\-/,]+", t) if w] for t in (a or "", b or ""))
+    if len(wa) > len(wb):
+        wa, wb = wb, wa
+    if len(wa) < 2:
+        return False
+    return all(any(w == v or (len(w) >= 2 and len(v) >= 2 and (v.startswith(w) or w.startswith(v))) for v in wb)
+               for w in wa)
+
+
 def make_briefing(watcher: "Watcher") -> dict:
     """최근 briefing_hours 시간의 중요 뉴스를 사건별로 묶어 점수 높은 순으로 고른다."""
     cfg = watcher.cfg
@@ -821,7 +839,9 @@ def make_briefing(watcher: "Watcher") -> dict:
         t = parse_ts(r.get("created_at", ""))
         if (not t or t < cutoff or r["score"] < cfg["threshold"] or fb.get(r["id"]) in ("0", "00")):
             continue
-        groups.setdefault(r.get("topic") or r["id"], []).append(r)
+        topic = r.get("topic") or r["id"]
+        key = next((k for k in groups if same_topic(k, topic)), topic)   # 이름이 조금 다른 같은 사건은 한데
+        groups.setdefault(key, []).append(r)
     items = []
     for key, rs in groups.items():
         rs.sort(key=lambda r: (r["score"], r.get("created_at", "")), reverse=True)

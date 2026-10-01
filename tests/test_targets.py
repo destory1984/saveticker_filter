@@ -61,3 +61,14 @@ def test_candidate():
 
 def test_ticker_key():
     assert targets_db.ticker_key("000660.KS") == "000660" and targets_db.ticker_key("$amd") == "AMD"
+
+
+def test_same_topic():
+    import news_alert as a
+    # 브리핑에 "골드만 연준 전망" 과 "골드만삭스 연준 전망" 이 따로 나왔다 (10-01)
+    for x, y in [("골드만 연준 전망", "골드만삭스 연준 전망"), ("트럼프 시진핑 회담", "트럼프-시진핑 회담"),
+                 ("엔비디아 자사주", "엔비디아 자사주 매입"), ("미 소비자신뢰 지수", "미 소비자신뢰지수")]:
+        assert a.same_topic(x, y) and a.same_topic(y, x), (x, y)
+    for x, y in [("연준 카시카리 발언", "연준 월러 발언"), ("이란", "이란 핵 양보 거부"), ("", ""),
+                 ("미 국채 투매", "마이크론 실적 발표")]:
+        assert not a.same_topic(x, y), (x, y)
