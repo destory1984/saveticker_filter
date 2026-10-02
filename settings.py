@@ -129,6 +129,12 @@ def row(cfg: dict, key: str, small: str = "", tip: str = "", control: str = "") 
     return f"<div class=mrow>{_label(LABELS[key], small, tip)}{control}</div>{more}"
 
 
+def tts_switch(cfg: dict) -> str:
+    """판별 목록 오른쪽 위, 글자 크기 단추 옆의 음성 스위치. 설정 창을 열지 않고 켜고 끈다."""
+    tip = "알림을 음성으로 읽는다: 말머리 소리 뒤에 제목을 줄인 말. 끄면 토스트 소리가 난다. 목소리·빠르기는 ⚙ 설정"
+    return f"<span class=ttsw title=\"{e(tip)}\">🔊 음성 {_switch(cfg, 'tts')}</span>"
+
+
 def menu(cfg: dict) -> str:
     q = cfg.get("tts_quiet") or ""
     qfrom, qto = q.split("-") if re.fullmatch(r"\d\d:\d\d-\d\d:\d\d", q) else ("23:00", "07:00")
@@ -140,7 +146,7 @@ def menu(cfg: dict) -> str:
   {row(cfg, "max_age_min", "나온 지 이보다 오래되면 알리지 않는다", "PC 가 잠들었다 깨면 밀린 뉴스가 한꺼번에 들어온다. 시한이 지난 뉴스도 판별해서 목록에는 올린다.")}
 
   <div class=mhead>소리 <small>꺼 둔 때도 알림 목록에는 쌓인다</small></div>
-  {row(cfg, "tts", "말머리 소리 뒤에 제목을 줄인 말을 읽는다", "제목을 12자 안팎으로 줄인 말을 Edge 음성으로 읽는다 (예: 이란 휴전안 거부). 인터넷이 안 되면 윈도우 기본 음성으로 읽는다. 켜 두면 토스트 소리는 끈다.")}
+  <div class=mrow><small class=sub>음성 켜고 끄기는 오른쪽 위 🔊 음성 스위치. 제목을 12자 안팎으로 줄인 말을 Edge 음성으로 읽고, 인터넷이 안 되면 윈도우 기본 음성으로 읽는다</small></div>
   {row(cfg, "tts_voice", "종목 뉴스 필터는 선희 (여)")}
   {row(cfg, "tts_rate")}
   {row(cfg, "tts_volume", "말머리 소리는 그대로")}
@@ -174,7 +180,8 @@ BUTTON = "<button type=button class='hbtn setbtn' id=setbtn aria-expanded=false>
 # 판별 목록 오른쪽 위: 글자 크기 단추(FS_BAR) 다음에 ⚙ 설정 단추 (종목 뉴스 필터와 같은 순서). 이 페이지에서만 글자 크기 단추를 왼쪽으로 민다
 CSS = """
 :root{--bg:#16181c;--panel:#1c1f24;--line:#2e333b;--text:#e6e6e6;--muted:#8a9099;--pos:#3cc47c;--neg:#f0605a;--down:#5b8ff0;--sel:#23272e;--input:#16181c}
-h2{padding-right:200px}
+h2{padding-right:330px}
+.ttsw{position:fixed;top:10px;right:184px;z-index:5;display:inline-flex;align-items:center;gap:5px;font-size:14px;color:var(--muted);white-space:nowrap}
 .hbtn{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:99px;padding:2px 9px;cursor:pointer;white-space:nowrap}
 .hbtn:hover{background:var(--sel)} .hbtn:disabled{opacity:.4;cursor:default}
 .setbtn{position:fixed;top:10px;right:16px;z-index:5;font-size:14px}
@@ -250,14 +257,15 @@ JS = r"""
     say(d, d.ok ? "적용했다 · " + d.label : "");
     return d.ok;
   }
-  const isOn = key => menu.querySelector(`.switch[data-key="${key}"]`).getAttribute("aria-checked") === "true";
+  // 음성 스위치는 설정 창 밖(오른쪽 위)에 있다
+  const isOn = key => document.querySelector(`.switch[data-key="${key}"]`).getAttribute("aria-checked") === "true";
   function dim() {   // 꺼 둔 기능의 딸린 칸은 흐리게
     $("#qfrom").disabled = $("#qto").disabled = !isOn("quiet_on");
     ["tts_voice", "tts_rate", "tts_volume", "tts_chime"].forEach(k => menu.querySelector(`[data-key="${k}"]`).disabled = !isOn("tts"));
     $("#brat").disabled = !isOn("briefing_on");
     ["briefing_hours", "briefing_max"].forEach(k => menu.querySelector(`[data-key="${k}"]`).disabled = !isOn("briefing_on"));
   }
-  menu.querySelectorAll(".switch[data-key]").forEach(sw => sw.onclick = async () => {
+  document.querySelectorAll(".switch[data-key]").forEach(sw => sw.onclick = async () => {
     const on = sw.getAttribute("aria-checked") !== "true";
     if (await setKey(sw.dataset.key, on)) sw.setAttribute("aria-checked", on);
     dim();

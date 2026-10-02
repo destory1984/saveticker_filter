@@ -1512,6 +1512,7 @@ a{{color:#e6e6e6;text-decoration:none}} .s{{text-align:right;font-weight:600}} .
 </style>
 {FS_BAR}
 <style>{settings.CSS}</style>
+{settings.tts_switch(watcher.cfg)}
 {settings.BUTTON}
 {settings.menu(watcher.cfg)}
 <script>{settings.JS}</script>
