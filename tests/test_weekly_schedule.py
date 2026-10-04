@@ -35,24 +35,35 @@ def test_plan_times_and_reminders():
     adds, skipped = ws.plan([
         item("2026-10-05", "22:45", "9월 S&P글로벌 서비스업 PMI"),
         item("2026-10-08", "05:10", "리바이스", "실적", "LEVI", "장후"),
-        item("2026-10-06", "", "RPM", "실적", "RPM", "장전"),
+        item("2026-10-06", "", "아람코 상장", "행사"),
     ], [], NOW)
     assert not skipped
-    pmi, levi, rpm = adds
+    pmi, levi, ipo = adds
     assert (pmi["when"].isoformat(), pmi["remind_at"], pmi["allday"]) == ("2026-10-05T22:45:00+09:00", None, False)
     # 새벽 일정은 전날 밤 10시에 알린다
     assert levi["title"] == "리바이스(LEVI) 실적 발표 (장 마감 뒤)"
     assert levi["remind_at"].isoformat() == "2026-10-07T22:00:00+09:00"
     # 시각을 모르면 날짜만 적고 그날 아침 8시에 알린다
-    assert rpm["title"] == "RPM(RPM) 실적 발표 (장 전)" and rpm["allday"]
-    assert rpm["remind_at"].isoformat() == "2026-10-06T08:00:00+09:00"
+    assert ipo["title"] == "아람코 상장" and ipo["allday"]
+    assert ipo["remind_at"].isoformat() == "2026-10-06T08:00:00+09:00"
+
+
+def test_plan_leaves_out_dividends_and_untimed_earnings():
+    # 10-04 전하 분부: 배당락과 작은 회사 실적(시각 없이 "주간 실적 한눈에"에만 있는 것)은 뺀다
+    adds, skipped = ws.plan([
+        item("2026-10-06", "", "배당락 JPM 등", "배당락"),
+        item("2026-10-06", "", "RPM", "실적", "RPM", "장전"),
+        item("2026-10-06", "21:00", "램웨스턴", "실적", "LW", "장전"),
+    ], [], NOW)
+    assert [a["title"] for a in adds] == ["램웨스턴(LW) 실적 발표 (장 전)"]
+    assert skipped == [("배당락 JPM 등", "배당락"), ("RPM(RPM) 실적 발표 (장 전)", "작은 회사 실적")]
 
 
 def test_plan_skips_past_dup_and_far():
     existing = [{"when": "2026-10-08T19:00+09:00", "title": "펩시(PEP) 실적 발표 (장 전)"}]
     adds, skipped = ws.plan([
         item("2026-10-03", "21:30", "9월 고용보고서"),                          # 지난 일
-        item("2026-10-08", "", "pepsico", "실적", "PEP", "장전"),               # 티커가 이미 있다
+        item("2026-10-08", "19:00", "pepsico", "실적", "PEP", "장전"),          # 티커가 이미 있다
         item("2026-10-08", "03:00", "FOMC 의사록", dup="미국 FOMC 의사록"),      # 모델이 같은 일이라 했다
         item("2026-10-07", "23:30", "EIA 원유 재고"),
         item("2026-10-07", "23:30", "EIA 원유재고"),                            # 두 장에 나온 같은 일

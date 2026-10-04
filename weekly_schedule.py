@@ -139,7 +139,7 @@ def event_title(it: dict) -> str:
 
 def plan(items: list, existing: list, now: datetime) -> tuple:
     """([넣을 일정], [(제목, 까닭)]). 넣을 일정은 {"when", "title", "allday", "remind_at"}.
-    existing 은 감자봇의 일정들({"when", "title"})이다. 지난 것, 이미 있는 것, 같은 것은 넣지 않는다."""
+    existing 은 감자봇의 일정들({"when", "title"})이다. 지난 것, 이미 있는 것, 같은 것, 배당락, 시각 없는 실적은 넣지 않는다."""
     adds, skipped, seen = [], [], set()
     for it in items:
         title = event_title(it)
@@ -149,6 +149,10 @@ def plan(items: list, existing: list, now: datetime) -> tuple:
             when = datetime(day.year, day.month, day.day, h, mi, tzinfo=KST)
         except ValueError:
             skipped.append((title, "날짜를 모름"))
+            continue
+        # 10-04 전하 분부: 배당락과 작은 회사 실적은 뺀다. 작은 회사는 "주간 실적 한눈에"에만 있어 시각이 없다
+        if it["kind"] == "배당락" or (it["kind"] == "실적" and not it["time"]):
+            skipped.append((title, "배당락" if it["kind"] == "배당락" else "작은 회사 실적"))
             continue
         if when < now:
             skipped.append((title, "지난 일"))
