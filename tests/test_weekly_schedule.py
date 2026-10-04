@@ -74,6 +74,18 @@ def test_plan_skips_past_dup_and_far():
     assert [why for _, why in skipped] == ["지난 일", "이미 있음", "이미 있음", "이미 있음", "두 주 넘게 남음", "날짜를 모름"]
 
 
+def test_closing_report_only_text_version_and_fresh():
+    from datetime import timedelta
+    text = {"id": "t", "title": "[SAVE PICK] SAVE 마감 리포트｜ 26년 10월 02일 (금) - 텍스트", "source": "오선",
+            "url": "https://saveticker.com/news/t", "ts": NOW - timedelta(minutes=4)}
+    image = dict(text, id="i", title="SAVE 마감 리포트｜ 26년 10월 02일 (금)")      # 그림 판은 올리지 않는다
+    old = dict(text, id="o", ts=NOW - timedelta(hours=5))                         # 뒤늦게 본 것은 올리지 않는다
+    other = dict(text, id="x", source="reuters")
+    assert [r["id"] for r in ws.closing_todo([text, text, image, old, other], {}, NOW)] == ["t"]
+    assert ws.closing_todo([text], {"t": {"closing": True}}, NOW) == []
+    assert ws.closing_text(text) == "SAVE 마감 리포트｜ 26년 10월 02일 (금)\nhttps://saveticker.com/news/t"
+
+
 def test_todo_skips_done_and_failed():
     rows = [{"id": "a", "title": "10월 2주 차 주요 일정", "source": "오선"},
             {"id": "b", "title": "10월 1주 차 주요 일정", "source": "오선"},

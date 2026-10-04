@@ -98,6 +98,7 @@ DEFAULTS = {
     "briefing_max": 5,             # 브리핑에서 읽어 줄 사건 수
     "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
     "kakao_dir": "",               # 감자봇(kakaotalk_aiagent) 폴더. 적어 두면 "N주 차 주요 일정" 뉴스의 그림을 읽어 그 일정에 넣는다
+    "closing_to_room": True,       # "SAVE 마감 리포트 - 텍스트" 가 올라오면 감자봇이 단체방에 제목과 링크를 올린다 (kakao_dir 이 있어야 한다)
     "weekly_model": "sonnet",      # 주간 일정 그림을 읽는 claude 모델 (로컬 모델과 haiku 는 한글을 많이 틀린다)
 }
 
@@ -916,9 +917,10 @@ def briefing_worker(watcher: "Watcher"):
 
 
 def weekly_worker(watcher: "Watcher"):
-    """오선의 "N월 N주 차 주요 일정" 뉴스가 들어오면 그림을 읽어 감자봇 일정에 넣는다. 5분마다 살핀다."""
+    """오선의 "N월 N주 차 주요 일정" 뉴스가 들어오면 그림을 읽어 감자봇 일정에 넣는다.
+    "SAVE 마감 리포트 - 텍스트" 가 들어오면 감자봇이 단체방에 제목과 링크를 올리게 한다. 2분마다 살핀다."""
     while True:
-        time.sleep(300)
+        time.sleep(120)
         try:
             cfg = watcher.cfg
             if not cfg.get("kakao_dir"):
@@ -936,6 +938,12 @@ def weekly_worker(watcher: "Watcher"):
                     done[r["id"]] = {"fail": fail}
                     log(f"주간 일정 읽기 실패 ({fail}/{weekly_schedule.MAX_FAIL}): {type(e).__name__}: {e}")
                 weekly_schedule.write_done(done)
+            if cfg.get("closing_to_room", True):
+                for r in weekly_schedule.closing_todo(read_news(days=1), done, datetime.now(timezone.utc)):
+                    weekly_schedule.post_closing(cfg, r)
+                    done[r["id"]] = {"at": datetime.now(KST).isoformat(timespec="seconds"), "closing": True}
+                    weekly_schedule.write_done(done)
+                    log(f"📰 {r['title']}: 감자봇이 단체방에 제목과 링크를 올리게 함")
         except Exception as e:
             log(f"주간 일정 오류: {type(e).__name__}: {e}")
 

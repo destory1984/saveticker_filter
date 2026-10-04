@@ -7,6 +7,9 @@
 설정 `kakao_dir` 에 감자봇 폴더를 적어야 돈다. 비어 있으면 아무 일도 하지 않는다.
 한 뉴스는 한 번만 읽는다 (weekly_done.json). 세 번 실패하면 그 뉴스는 그만둔다.
 
+"SAVE 마감 리포트｜ 26년 10월 02일 (금) - 텍스트" 가 올라오면 제목과 링크를 감자봇이 단체방에 올리게 한다 (2026-10-04).
+감자봇의 "그 시각에 이 말을 단체방에 올려라"(say) 일정으로 넘긴다. 하루에 그림 판과 글 판 두 건이 올라오는데 글 판만 쓴다.
+
     python weekly_schedule.py --dry            # 가장 최근 주간 일정 뉴스를 읽어 넣을 것만 보여 준다
     python weekly_schedule.py --dry news_xxx   # 그 뉴스로
     python weekly_schedule.py news_xxx         # 실제로 넣는다
@@ -29,6 +32,8 @@ KST = timezone(timedelta(hours=9))
 SITE = "https://www.saveticker.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 TITLE_RE = re.compile(r"\d+\s*월\s*\d+\s*주\s*차\s*주요\s*일정")
+CLOSING_RE = re.compile(r"(SAVE\s*마감\s*리포트.*?)\s*-\s*텍스트\s*$")
+CLOSING_MAX_AGE = timedelta(hours=3)   # 이보다 오래된 마감 리포트는 올리지 않는다 (PC 가 잠들었다 깨어 뒤늦게 올리지 않게)
 AUTHOR = "오선"
 SOURCE = "세이브"        # calendar.json 의 source 칸
 REMIND_HOUR = 8         # 시각을 모르는 일정은 그날 아침 이 시각에 알린다
@@ -59,6 +64,32 @@ PROMPT = """이 그림들은 세이브티커의 주간 증시 일정표다 (표�
 
 def is_weekly(row: dict) -> bool:
     return row.get("source") == AUTHOR and bool(TITLE_RE.search(row.get("title", "")))
+
+
+def is_closing(row: dict) -> bool:
+    return row.get("source") == AUTHOR and bool(CLOSING_RE.search(row.get("title", "")))
+
+
+def closing_text(row: dict) -> str:
+    """단체방에 올릴 글: 제목(" - 텍스트" 는 뗀다)과 링크."""
+    return f"{CLOSING_RE.search(row['title']).group(1).strip()}\n{row['url']}"
+
+
+def closing_todo(rows: list, done: dict, now: datetime) -> list:
+    """아직 올리지 않은, 나온 지 CLOSING_MAX_AGE 안의 마감 리포트."""
+    out, seen = [], set()
+    for r in rows:
+        if is_closing(r) and r["id"] not in seen and r["id"] not in done and now - r["ts"] <= CLOSING_MAX_AGE:
+            seen.add(r["id"])
+            out.append(r)
+    return out
+
+
+def post_closing(cfg: dict, row: dict, target: str = "room", now: datetime = None) -> dict:
+    """감자봇 일정에 "1분 뒤 이 말을 올려라"로 적는다. 감자봇이 20초마다 일정을 보고 올린다."""
+    now = now or datetime.now(KST)
+    sched = kakao_schedule(cfg["kakao_dir"])
+    return sched.add(now + timedelta(minutes=1), "세이브 마감 리포트 올리기", SOURCE, say=closing_text(row), target=target)
 
 
 # ---------------------------- 그림 받기·읽기 ----------------------------
