@@ -1892,9 +1892,13 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
         flat = sorted(((g, short(gs)) for gs in groups.values() for g in gs), key=lambda x: x[0]["at"], reverse=True)
         body = f"<table class=tg>{''.join(target_row(g, t) for g, t in flat)}</table>" if flat else ""
     else:
-        body = "".join(f"<div class=card><div><b>{title(gs)}</b> <span class=why>· {len(gs)}건</span></div>"
-                       f"<table class=tg>{''.join(target_row(g) for g in gs)}</table></div>"
-                       for gs in sorted(groups.values(), key=lambda gs: gs[0]["stock"].lower()))
+        # 회사별 표에는 증권사마다 가장 새 조치만 (10-04 전하 분부). 최신순 표는 모든 줄을 그대로 둔다
+        def card(gs):
+            last = targets.latest_per_broker(gs)
+            older = f" (같은 증권사의 앞선 조치 {len(gs) - len(last)}건 뺌)" if len(gs) > len(last) else ""
+            return (f"<div class=card><div><b>{title(gs)}</b> <span class=why>· {len(last)}건{older}</span></div>"
+                    f"<table class=tg>{''.join(target_row(g) for g in last)}</table></div>")
+        body = "".join(card(gs) for gs in sorted(groups.values(), key=lambda gs: gs[0]["stock"].lower()))
     done = read_targets()
     todo = sum(1 for r in list(watcher.judged.values()) if r["id"] not in done and targets.is_candidate(r))
     order = "name" if order == "name" else ""
@@ -1936,7 +1940,7 @@ addEventListener("DOMContentLoaded",()=>{{
 <p class=sort>정렬: {sort} <a id=tgw></a> <a id=cpy>그림으로 복사</a> <select id=cpyn><option value=20>위 20줄<option value=40>위 40줄<option value=0>전체</select> <span id=cpymsg class=why></span></p>
 <p class=sort>보기: <select id=tgd><option value=0>30일 전체<option value=1>오늘<option value=3>3일<option value=7>7일</select> <label><input type=checkbox id=tgk> 유지·제시 빼기</label> <span id=tgc class=why></span></p>
 <p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · stocknews_filter(종목 뉴스 필터)가 뽑은 것도 함께 보인다 · 판별 모델(Ollama, 꺼져 있으면 Claude)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
-같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
+같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{" 회사 이름 순 표에는 증권사마다 가장 새 조치만 보인다 (앞선 조치는 최신순 표에). 새 조치의 제목에 목표가가 없으면 그 증권사의 앞선 목표가를 적었다." if order == "name" else ""}{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
 {body or "<p>아직 뽑은 목표가가 없다.</p>"}"""
 
 

@@ -54,6 +54,17 @@ def test_group_merges_across_alerters_and_votes():
     assert [(x["broker"], x["action"], len(x["news"])) for x in g] == [("Baird", "상향", 3), ("UBS", "유지", 1)]
 
 
+def test_latest_per_broker_keeps_the_newest_line_and_fills_its_target():
+    # 10-04: 회사별 표의 Micron 에 Goldman Sachs 가 둘, JPMorgan 은 새 줄에 목표가가 없었다
+    rows = [_row("Micron", "MU", "Goldman", "유지", 1250, 0), _row("Micron", "MU", "JP Morgan", "유지", None, 5),
+            _row("Micron", "MU", "Goldman Sachs", "유지", 1100, 60), _row("Micron", "MU", "JPMorgan", "상향", 1540, 72)]
+    g = targets.latest_per_broker(targets.group(rows))
+    assert [(x["broker"], x["action"], x["pt_new"]) for x in g] == [("Goldman", "유지", 1250), ("JP Morgan", "유지", 1540)]
+    # 새 줄이 상향·하향이면 앞선 목표가는 바뀌기 전 값이라 적지 않는다
+    rows = [_row("Micron", "MU", "Baird", "상향", None, 0), _row("Micron", "MU", "Baird", "유지", 1280, 72)]
+    assert targets.latest_per_broker(targets.group(rows))[0]["pt_new"] is None
+
+
 def test_candidate():
     assert targets.is_candidate({"title": "BofA, AMD 목표주가 620달러에서 720달러로 상향"})
     assert not targets.is_candidate({"title": "연준 바 부의장 발언"})
