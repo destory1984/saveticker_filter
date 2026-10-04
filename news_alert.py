@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
+import prices
 import settings
 import weekly_schedule
 import targets
@@ -1859,6 +1860,23 @@ def target_row(g: dict, stock: str = "") -> str:
             f"<td class=nw>{news}</td></tr>")
 
 
+def consensus_html(gs: list, ticker: str, got: dict) -> str:
+    """회사별 표의 회사 칸 머리에 붙는 한 줄: 평균 목표가(증권사 수, 최저 → 최고) · 현재가 · 괴리율 (stocknews_filter 와 같게).
+    괴리율은 평균 목표가가 현재가보다 얼마나 높은가다. 현재가를 못 받았거나 통화가 다르면 평균만 보인다."""
+    c = targets.consensus(gs)
+    if not c:
+        return ""
+    cur = c["currency"]
+    out = f"평균 목표가 <b style='color:#e6e6e6'>{money(c['avg'], cur)}</b> ({c['n']}곳"
+    out += f", {money(c['low'], cur)} → {money(c['high'], cur)})" if c["low"] != c["high"] else ")"
+    price = got.get(ticker)
+    if price and cur == ("KRW" if ticker[:1].isdigit() else "USD"):
+        gap = targets.gap_pct(c["avg"], price[0])
+        out += (f" · 현재가 {money(price[0], cur)} <span class=pct>({price[1].astimezone(KST):%m-%d %H:%M})</span>"
+                f" · 괴리율 <b style='color:{'#e06c6c' if gap >= 0 else '#6c9be0'}'>{gap:+.1f}%</b>")
+    return f"<div class='why cs'>{out}</div>"
+
+
 def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
     """목표가 표: 최근 days 일, 모든 회사. 같은 조치를 여러 곳이 쓰면 한 줄 (targets.group).
     order "" 는 모든 회사를 한 표에 최신순, "name" 은 회사마다 칸을 나눠 이름 순 (09-30 전하 분부로 최신순이 기본). 관찰 종목은 ★."""
@@ -1893,10 +1911,14 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
         body = f"<table class=tg>{''.join(target_row(g, t) for g, t in flat)}</table>" if flat else ""
     else:
         # 회사별 표에는 증권사마다 가장 새 조치만 (10-04 전하 분부). 최신순 표는 모든 줄을 그대로 둔다
+        tk = lambda gs: next((g["ticker"] for g in gs if g["ticker"]), "")
+        got = prices.last_prices(tk(gs) for gs in groups.values())   # 야후, 5분 묵혀 씀. 못 받으면 평균만 보인다
+
         def card(gs):
             last = targets.latest_per_broker(gs)
             older = f" (같은 증권사의 앞선 조치 {len(gs) - len(last)}건 뺌)" if len(gs) > len(last) else ""
             return (f"<div class=card><div><b>{title(gs)}</b> <span class=why>· {len(last)}건{older}</span></div>"
+                    f"{consensus_html(gs, tk(gs), got)}"
                     f"<table class=tg>{''.join(target_row(g) for g in last)}</table></div>")
         body = "".join(card(gs) for gs in sorted(groups.values(), key=lambda gs: gs[0]["stock"].lower()))
     done = read_targets()
@@ -1911,7 +1933,7 @@ def targets_page(watcher: "Watcher", order: str = "", days: int = 30) -> str:
 table.tg td{{padding:3px 8px 3px 0}} td.sk{{white-space:nowrap;font-weight:600;min-width:8em}}
 td.d,td.br,td.ac,td.pt,td.rt,td.bl{{white-space:nowrap}} td.d{{color:#8a9099;min-width:5.5em}} td.br{{min-width:9em}}
 td.ac{{min-width:4.5em}} td.pt{{min-width:13em}} td.rt{{min-width:5em}} td.bl{{min-width:1.5em}} td.nw{{width:100%}}
-.pct{{color:#8a9099}} ul{{margin:0;padding-left:18px}} ul.one{{list-style:none;padding:0}} summary{{cursor:pointer;color:#8ab4f8}}
+.pct{{color:#8a9099}} .cs{{margin:2px 0}} ul{{margin:0;padding-left:18px}} ul.one{{list-style:none;padding:0}} summary{{cursor:pointer;color:#8ab4f8}}
 .src{{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;background:#2a2d33;color:#b8bec6;font-size:0.79em}}
 .sort a{{color:#8ab4f8}}
 html.nar body{{max-width:660px;margin:8px}} html.nar .card{{padding:6px 8px}}
@@ -1940,7 +1962,7 @@ addEventListener("DOMContentLoaded",()=>{{
 <p class=sort>정렬: {sort} <a id=tgw></a> <a id=cpy>그림으로 복사</a> <select id=cpyn><option value=20>위 20줄<option value=40>위 40줄<option value=0>전체</select> <span id=cpymsg class=why></span></p>
 <p class=sort>보기: <select id=tgd><option value=0>30일 전체<option value=1>오늘<option value=3>3일<option value=7>7일</select> <label><input type=checkbox id=tgk> 유지·제시 빼기</label> <span id=tgc class=why></span></p>
 <p class=why>최근 {days}일 · {summary} · 모든 회사, ★ 는 interests.md 의 보유·관찰 종목 · stocknews_filter(종목 뉴스 필터)가 뽑은 것도 함께 보인다 · 판별 모델(Ollama, 꺼져 있으면 Claude)이 뉴스 제목에서 뽑았다. 틀릴 수 있으니 기사로 확인할 것.
-같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{" 회사 이름 순 표에는 증권사마다 가장 새 조치만 보인다 (앞선 조치는 최신순 표에). 새 조치의 제목에 목표가가 없으면 그 증권사의 앞선 목표가를 적었다." if order == "name" else ""}{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
+같은 회사·증권사의 조치를 이틀 안에 여러 곳이 쓰면 한 줄로 합쳤다 (목표가가 다르면 따로, 구분은 가장 많이 나온 것).{" 회사 이름 순 표에는 증권사마다 가장 새 조치만 보인다 (앞선 조치는 최신순 표에). 새 조치의 제목에 목표가가 없으면 그 증권사의 앞선 목표가를 적었다. 평균 목표가는 증권사마다 가장 새 목표가 하나씩의 평균이고, 괴리율은 평균 목표가가 현재가(야후, 장 전·장 뒤 포함)보다 얼마나 높은가다." if order == "name" else ""}{f" 아직 뽑지 않은 후보 {todo}건." if todo > 0 else ""}</p>
 {body or "<p>아직 뽑은 목표가가 없다.</p>"}"""
 
 

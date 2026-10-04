@@ -184,3 +184,20 @@ def latest_per_broker(groups: list) -> list:
         if not new["rating"] and g["rating"] and new["action"] in ("유지", "제시", "신규"):
             new["rating"] = g["rating"]
     return out
+
+
+def consensus(groups: list):
+    """한 회사의 목표가 평균: {"n": 증권사 수, "avg", "low", "high", "currency"}. 목표가가 없으면 None.
+    증권사마다 가장 새 목표가 하나씩만 센다 (latest_per_broker). 통화가 섞여 있으면 가장 많은 통화만 센다."""
+    rows = [g for g in latest_per_broker(groups) if g["pt_new"]]
+    if not rows:
+        return None
+    curs = [g["currency"] for g in rows]
+    cur = max(dict.fromkeys(curs), key=curs.count)
+    pts = [g["pt_new"] for g in rows if g["currency"] == cur]
+    return {"n": len(pts), "avg": sum(pts) / len(pts), "low": min(pts), "high": max(pts), "currency": cur}
+
+
+def gap_pct(avg: float, price: float):
+    """괴리율(%): 평균 목표가가 현재가보다 얼마나 높은가. 현재가 100, 평균 목표가 120 이면 +20."""
+    return (avg / price - 1) * 100 if avg and price else None

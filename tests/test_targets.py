@@ -65,6 +65,19 @@ def test_latest_per_broker_keeps_the_newest_line_and_fills_its_target():
     assert targets.latest_per_broker(targets.group(rows))[0]["pt_new"] is None
 
 
+def test_consensus_counts_each_broker_once():
+    rows = [_row("Micron", "MU", "Goldman Sachs", "상향", 1250, 0), _row("Micron", "MU", "Baird", "유지", 1520, 5),
+            _row("Micron", "MU", "Goldman Sachs", "유지", 1100, 60), _row("Micron", "MU", "Melius", "유지", None, 70)]
+    c = targets.consensus(targets.group(rows))
+    assert (c["n"], c["avg"], c["low"], c["high"], c["currency"]) == (2, 1385, 1250, 1520, "USD")
+    assert round(targets.gap_pct(1385, 1069.15), 1) == 29.5 and targets.gap_pct(1385, None) is None
+
+
+def test_yahoo_symbols():
+    import prices
+    assert prices.yahoo_symbols("MU") == ["MU"] and prices.yahoo_symbols("005930") == ["005930.KS", "005930.KQ"]
+
+
 def test_candidate():
     assert targets.is_candidate({"title": "BofA, AMD 목표주가 620달러에서 720달러로 상향"})
     assert not targets.is_candidate({"title": "연준 바 부의장 발언"})
