@@ -41,6 +41,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import requests
 
 import settings
+import weekly_schedule
 import targets
 import targets_db
 
@@ -96,6 +97,8 @@ DEFAULTS = {
     "briefing_hours": 12,          # 브리핑에 담을 기간
     "briefing_max": 5,             # 브리핑에서 읽어 줄 사건 수
     "suggest_backend": "claude",   # 관심사 제안을 누구에게 묻나. "claude" / "auto" (ollama 먼저) / "ollama"
+    "kakao_dir": "",               # 감자봇(kakaotalk_aiagent) 폴더. 적어 두면 "N주 차 주요 일정" 뉴스의 그림을 읽어 그 일정에 넣는다
+    "weekly_model": "sonnet",      # 주간 일정 그림을 읽는 claude 모델 (로컬 모델과 haiku 는 한글을 많이 틀린다)
 }
 
 PROMPT = """너는 한 개인 투자자의 뉴스 비서다.
@@ -910,6 +913,31 @@ def briefing_worker(watcher: "Watcher"):
                 deliver_briefing(watcher)
         except Exception as e:
             log(f"브리핑 오류: {type(e).__name__}: {e}")
+
+
+def weekly_worker(watcher: "Watcher"):
+    """오선의 "N월 N주 차 주요 일정" 뉴스가 들어오면 그림을 읽어 감자봇 일정에 넣는다. 5분마다 살핀다."""
+    while True:
+        time.sleep(300)
+        try:
+            cfg = watcher.cfg
+            if not cfg.get("kakao_dir"):
+                continue
+            done = weekly_schedule.read_done()
+            for r in weekly_schedule.todo(read_news(days=3), done):
+                try:
+                    made, skipped = weekly_schedule.run(cfg, r["id"])
+                    done[r["id"]] = {"at": datetime.now(KST).isoformat(timespec="seconds"), "added": len(made)}
+                    log(f"📅 {r['title']}: 감자봇 일정에 {len(made)}건 넣음, {len(skipped)}건은 넣지 않음")
+                    plain_toast(cfg, "주간 일정을 감자봇 일정에 넣었습니다",
+                                f"{r['title']}\n{len(made)}건 넣음 · 이미 있거나 지난 {len(skipped)}건은 넣지 않음")
+                except Exception as e:
+                    fail = done.get(r["id"], {}).get("fail", 0) + 1
+                    done[r["id"]] = {"fail": fail}
+                    log(f"주간 일정 읽기 실패 ({fail}/{weekly_schedule.MAX_FAIL}): {type(e).__name__}: {e}")
+                weekly_schedule.write_done(done)
+        except Exception as e:
+            log(f"주간 일정 오류: {type(e).__name__}: {e}")
 
 
 def summary_toast(cfg: dict, n: int, top: list):
@@ -2138,6 +2166,7 @@ def main():
     threading.Thread(target=suggest_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=health_worker, args=(watcher,), daemon=True).start()
     threading.Thread(target=briefing_worker, args=(watcher,), daemon=True).start()
+    threading.Thread(target=weekly_worker, args=(watcher,), daemon=True).start()
     moved = move_targets_to_shared(watcher)
     if moved:
         log(f"🎯 목표가 기록 {moved}건을 공용 DB 로 옮김 ({targets_db.PATH})")

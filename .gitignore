@@ -17,3 +17,5 @@ news_targets.jsonl
 # 설정은 이 PC 것이다. 처음 켤 때 DEFAULTS 로 만들어지고 ⚙ 설정 창이 고쳐 쓴다
 news_alert_config.json
 .pytest_cache/
+# 주간 일정 뉴스를 읽었다는 기록
+weekly_done.json
