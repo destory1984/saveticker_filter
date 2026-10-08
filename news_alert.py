@@ -500,7 +500,7 @@ def toast(cfg: dict, r: dict, score: int, reason: str):
     try:
         from winotify import Notification, audio
     except ImportError:
-        log("winotify 가 없어 토스트를 띄우지 못했다. pip install winotify")
+        log("winotify 가 없어 토스트를 띄우지 못했습니다. pip install winotify")
         return
     fb = f"http://127.0.0.1:{cfg['port']}/fb?id={r['id']}"
     n = Notification(app_id="SaveTicker 뉴스", title=f"[{score}점] {reason}",
@@ -814,12 +814,12 @@ def health_worker(watcher: "Watcher"):
             if now == watcher.problem:
                 continue
             if now and not watcher.problem:
-                log(f"⚠ 뉴스 수집이 멈췄다: {now}")
+                log(f"⚠ 뉴스 수집이 멈췄습니다: {now}")
                 plain_toast(watcher.cfg, "뉴스 수집이 멈췄습니다", now)
             elif now:
-                log(f"⚠ 수집 탈이 바뀌었다: {now}")
+                log(f"⚠ 수집 탈이 바뀌었습니다: {now}")
             else:
-                log("✅ 뉴스 수집이 다시 된다")
+                log("✅ 뉴스 수집이 다시 됩니다")
                 plain_toast(watcher.cfg, "뉴스 수집이 다시 됩니다", "새 뉴스가 다시 들어옵니다")
             watcher.problem = now
         except Exception as e:
@@ -1143,7 +1143,7 @@ class Watcher:
             t = time.time()
             time.sleep(self.cfg["poll_sec"])
             if time.time() - t > self.cfg["wake_gap_min"] * 60:
-                log(f"감시가 {(time.time() - t) / 60:.0f}분 끊겼다 (PC 절전으로 봄). 밀린 뉴스를 판별하고 요약한다")
+                log(f"감시가 {(time.time() - t) / 60:.0f}분 끊겼습니다 (PC 절전으로 봄). 밀린 뉴스를 판별하고 요약합니다")
                 self.woke()
 
 
@@ -1711,7 +1711,7 @@ def targets_worker(watcher: "Watcher", size: int = 8, most: int = 3):
             down = False
         except requests.RequestException as e:
             if not down:
-                log(f"🎯 목표가 뽑기: Ollama 에 못 물음 ({type(e).__name__}). 켜질 때까지 5분마다 다시 본다")
+                log(f"🎯 목표가 뽑기: Ollama 에 못 물음 ({type(e).__name__}). 켜질 때까지 5분마다 다시 봅니다")
             down, wait = True, 300
         except Exception as e:
             log(f"🎯 목표가 뽑기 오류: {type(e).__name__}: {str(e)[:120]}")
@@ -2191,7 +2191,9 @@ def main():
         server = Server(("127.0.0.1", cfg["port"]), make_handler(watcher))
     except OSError as e:
         # 이미 하나 떠 있는 경우가 대부분이다. 종료 코드 3 이면 news_alert.bat 이 다시 띄우지 않는다.
-        log(f"포트 {cfg['port']} 를 쓸 수 없다 ({e}). 이미 실행 중이거나, {CONFIG.name} 의 port 를 바꿔라.")
+        log(f"포트 {cfg['port']} 를 쓸 수 없습니다.\n"
+            f"  ({e})\n"
+            f"  이미 실행 중이거나, {CONFIG.name} 의 port 를 바꿔 주세요.")
         sys.exit(3)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=_speech_worker, args=(cfg,), daemon=True).start()
